@@ -32,10 +32,18 @@ class ToolsTests(unittest.TestCase):
     def test_tools_registered_with_schemas(self) -> None:
         self.assertIn("search_incubator_general_mail", tools.TOOLS)
         self.assertIn("cache_incubator_general_mbox", tools.TOOLS)
+        self.assertIn("find_release_vote_threads", tools.TOOLS)
+        self.assertIn("podling_release_vote_history", tools.TOOLS)
         self.assertEqual(
             tools.TOOLS["get_incubator_general_email"]["inputSchema"]["properties"]["message_id"][
                 "type"
             ],
+            "string",
+        )
+        self.assertEqual(
+            tools.TOOLS["summarize_release_vote_thread"]["inputSchema"]["properties"][
+                "message_id"
+            ]["type"],
             "string",
         )
 

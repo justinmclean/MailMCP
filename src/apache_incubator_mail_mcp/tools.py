@@ -13,9 +13,13 @@ from apache_incubator_mail_mcp.client import (
     cache_mbox_range,
     fetch_email,
     fetch_mail_stats,
+    find_release_result_threads as client_find_release_result_threads,
+    find_release_vote_threads as client_find_release_vote_threads,
     find_cached_mail,
     list_cached_mboxes,
     load_cached_mail,
+    podling_release_vote_history as client_podling_release_vote_history,
+    summarize_release_vote_thread as client_summarize_release_vote_thread,
 )
 
 _CONFIGURED_API_BASE: str | None = None
@@ -211,6 +215,70 @@ def list_cached_incubator_general_mboxes(cache_dir: str | None = None) -> dict[s
     return list_cached_mboxes(cache_dir=resolve_cache_dir(cache_dir))
 
 
+def find_release_vote_threads(
+    api_base: str | None = None,
+    timespan: str | None = None,
+    podling: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Find likely Incubator release vote threads."""
+    return client_find_release_vote_threads(
+        api_base=resolve_api_base(api_base),
+        timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
+        podling=optional_string(podling, "podling"),
+        query=optional_string(query, "query"),
+        limit=require_limit(limit),
+    )
+
+
+def find_release_result_threads(
+    api_base: str | None = None,
+    timespan: str | None = None,
+    podling: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Find likely Incubator release vote result threads."""
+    return client_find_release_result_threads(
+        api_base=resolve_api_base(api_base),
+        timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
+        podling=optional_string(podling, "podling"),
+        query=optional_string(query, "query"),
+        limit=require_limit(limit),
+    )
+
+
+def summarize_release_vote_thread(
+    message_id: str,
+    api_base: str | None = None,
+    timespan: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Summarize likely votes and results in one Incubator release vote thread."""
+    return client_summarize_release_vote_thread(
+        api_base=resolve_api_base(api_base),
+        timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
+        message_id=require_non_empty_string(message_id, "message_id"),
+        limit=require_limit(limit),
+    )
+
+
+def podling_release_vote_history(
+    podling: str,
+    api_base: str | None = None,
+    timespan: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Return likely release vote and result history for one podling."""
+    return client_podling_release_vote_history(
+        api_base=resolve_api_base(api_base),
+        timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
+        podling=require_non_empty_string(podling, "podling"),
+        limit=require_limit(limit),
+    )
+
+
 TOOLS: dict[str, dict[str, Any]] = {
     "incubator_general_mail_overview": schemas.tool_definition(
         description="Return a high-level summary of Incubator general mailing list activity.",
@@ -266,5 +334,27 @@ TOOLS: dict[str, dict[str, Any]] = {
         description="List cached monthly general@incubator.apache.org mbox files.",
         handler=list_cached_incubator_general_mboxes,
         properties=schemas.cached_mbox_properties(),
+    ),
+    "find_release_vote_threads": schemas.tool_definition(
+        description="Find likely Incubator release vote threads on general@incubator.apache.org.",
+        handler=find_release_vote_threads,
+        properties=schemas.release_thread_search_properties(),
+    ),
+    "find_release_result_threads": schemas.tool_definition(
+        description="Find likely Incubator release vote result threads on general@incubator.apache.org.",
+        handler=find_release_result_threads,
+        properties=schemas.release_thread_search_properties(),
+    ),
+    "summarize_release_vote_thread": schemas.tool_definition(
+        description="Summarize likely votes and results in one Incubator release vote thread.",
+        handler=summarize_release_vote_thread,
+        properties=schemas.release_thread_summary_properties(),
+        required=["message_id"],
+    ),
+    "podling_release_vote_history": schemas.tool_definition(
+        description="Return likely release vote and result history for one Incubator podling.",
+        handler=podling_release_vote_history,
+        properties=schemas.podling_history_properties(),
+        required=["podling"],
     ),
 }

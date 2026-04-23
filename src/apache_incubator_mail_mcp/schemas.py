@@ -22,6 +22,7 @@ MONTH_PROPERTY = {"type": "string", "description": "Month in YYYY-MM format"}
 START_MONTH_PROPERTY = {"type": "string", "description": "Start month in YYYY-MM format"}
 END_MONTH_PROPERTY = {"type": "string", "description": "End month in YYYY-MM format"}
 HEADER_PROPERTY = {"type": "string", "description": "Optional Pony Mail mbox header filter"}
+PODLING_PROPERTY = {"type": "string", "description": "Optional podling/project name filter"}
 
 
 def input_schema(
@@ -113,4 +114,32 @@ def cached_email_properties() -> dict[str, Any]:
     return {
         "cache_dir": CACHE_DIR_PROPERTY,
         "message_id": MESSAGE_ID_PROPERTY,
+    }
+
+
+def release_thread_search_properties() -> dict[str, Any]:
+    return {
+        "api_base": API_BASE_PROPERTY,
+        "timespan": TIMESPAN_PROPERTY,
+        "podling": PODLING_PROPERTY,
+        "query": QUERY_PROPERTY,
+        "limit": LIMIT_PROPERTY,
+    }
+
+
+def release_thread_summary_properties() -> dict[str, Any]:
+    return {
+        "api_base": API_BASE_PROPERTY,
+        "timespan": TIMESPAN_PROPERTY,
+        "message_id": MESSAGE_ID_PROPERTY,
+        "limit": LIMIT_PROPERTY,
+    }
+
+
+def podling_history_properties() -> dict[str, Any]:
+    return {
+        "api_base": API_BASE_PROPERTY,
+        "timespan": TIMESPAN_PROPERTY,
+        "podling": PODLING_PROPERTY,
+        "limit": LIMIT_PROPERTY,
     }

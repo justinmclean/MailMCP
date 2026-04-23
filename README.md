@@ -68,6 +68,10 @@ The server uses `stdio`, so it is intended to be launched by an MCP client.
 - `cache_incubator_general_mbox`: downloads and caches one monthly raw mbox
 - `cache_incubator_general_mboxes`: downloads and caches a range of monthly raw mboxes
 - `list_cached_incubator_general_mboxes`: lists cached raw mbox files
+- `find_release_vote_threads`: finds likely Incubator podling release vote threads
+- `find_release_result_threads`: finds likely release vote result threads
+- `summarize_release_vote_thread`: summarizes likely votes and result messages in one release vote thread
+- `podling_release_vote_history`: returns likely release vote and result history for one podling
 
 ## Test
 

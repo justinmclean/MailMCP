@@ -24,6 +24,8 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertIn("search_incubator_general_mail", names)
         self.assertIn("cache_incubator_general_mboxes", names)
+        self.assertIn("find_release_vote_threads", names)
+        self.assertIn("summarize_release_vote_thread", names)
 
     def test_rejects_unknown_tool_argument(self) -> None:
         response = protocol.handle_payload(
