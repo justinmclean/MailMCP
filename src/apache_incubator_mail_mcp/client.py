@@ -13,6 +13,7 @@ DEFAULT_API_BASE = "https://lists.apache.org/api"
 DEFAULT_CACHE_DIR = ".cache/incubator-general-mail"
 DEFAULT_LIST = "general"
 DEFAULT_DOMAIN = "incubator.apache.org"
+DEFAULT_LIST_ADDRESS = f"{DEFAULT_LIST}@{DEFAULT_DOMAIN}"
 DEFAULT_TIMESPAN = "lte=1M"
 DEFAULT_SEARCH_TIMESPAN = "lte=12M"
 USER_AGENT = "apache-incubator-mail-mcp/0.1.0"
@@ -109,12 +110,17 @@ def _mail_entries(value: Any) -> list[dict[str, Any]]:
     return []
 
 
-def normalize_summary(raw: dict[str, Any], list_name: str = f"{DEFAULT_LIST}@{DEFAULT_DOMAIN}") -> MailSummary:
+def normalize_summary(
+    raw: dict[str, Any],
+    list_name: str = DEFAULT_LIST_ADDRESS,
+) -> MailSummary:
     epoch = _as_int(raw.get("epoch"))
     message_id = raw.get("message-id") or raw.get("message_id")
     mid = raw.get("mid") or raw.get("id") or message_id
     if not isinstance(mid, str) or not mid:
         raise ValueError("Email summary is missing a Pony Mail id")
+    raw_list = raw.get("list")
+    resolved_list = raw_list if isinstance(raw_list, str) and raw_list else list_name
     return MailSummary(
         id=mid,
         subject=raw.get("subject") if isinstance(raw.get("subject"), str) else None,
@@ -123,7 +129,7 @@ def normalize_summary(raw: dict[str, Any], list_name: str = f"{DEFAULT_LIST}@{DE
         date=raw.get("date") if isinstance(raw.get("date"), str) else _date_from_epoch(epoch),
         message_id=message_id if isinstance(message_id, str) else None,
         thread_id=raw.get("tid") if isinstance(raw.get("tid"), str) else raw.get("irt"),
-        list_name=raw.get("list") if isinstance(raw.get("list"), str) and raw.get("list") else list_name,
+        list_name=resolved_list,
         private=_as_bool(raw.get("private")),
         attachments=_as_int(raw.get("attachments")),
     )
@@ -149,7 +155,7 @@ def fetch_mail_stats(
     )
     payload = _read_json(url)
     list_name = payload.get("list")
-    resolved_list = list_name if isinstance(list_name, str) and list_name else f"{DEFAULT_LIST}@{DEFAULT_DOMAIN}"
+    resolved_list = list_name if isinstance(list_name, str) and list_name else DEFAULT_LIST_ADDRESS
     emails = [item.to_dict() for item in _summaries_from_payload(payload, resolved_list)]
     emails.sort(key=lambda item: item.get("epoch") or 0, reverse=True)
     if limit is not None:
@@ -244,14 +250,17 @@ def summarize_release_vote_thread(
 ) -> dict[str, Any]:
     """Summarize likely votes and result messages in one release vote thread."""
     root = fetch_email(api_base=api_base, message_id=message_id)
-    subject = root.get("subject") if isinstance(root.get("subject"), str) else ""
+    raw_subject = root.get("subject")
+    subject = raw_subject if isinstance(raw_subject, str) else ""
     thread_key = _thread_key(root)
     search_query = _release_search_query(None, _subject_search_text(subject))
     stats = fetch_mail_stats(api_base=api_base, timespan=timespan, query=search_query, limit=limit)
+    normalized_subject = _normal_subject(subject)
     summaries = [
         item
         for item in stats["emails"]
-        if _thread_key(item) == thread_key or _normal_subject(str(item.get("subject") or "")) == _normal_subject(subject)
+        if _thread_key(item) == thread_key
+        or _normal_subject(str(item.get("subject") or "")) == normalized_subject
     ]
     if not any(item["id"] == root["id"] for item in summaries):
         summaries.append({key: value for key, value in root.items() if key != "body"})
@@ -264,7 +273,6 @@ def summarize_release_vote_thread(
         except ValueError:
             message = item | {"body": ""}
         full_messages.append(message)
-        vote = _extract_vote(message)
     messages = [
         {
             "id": message.get("id"),
@@ -362,7 +370,8 @@ def _find_release_threads(
     limit: int | None,
     kind: str,
 ) -> dict[str, Any]:
-    search_query = _release_search_query(podling, query or ("RESULT release" if kind == "result" else "VOTE release"))
+    default_query = "RESULT release" if kind == "result" else "VOTE release"
+    search_query = _release_search_query(podling, query or default_query)
     stats = fetch_mail_stats(api_base=api_base, timespan=timespan, query=search_query, limit=None)
     predicate = _is_release_result_subject if kind == "result" else _is_release_vote_subject
     threads = _release_threads_from_emails(stats["emails"], predicate, podling)
@@ -405,7 +414,10 @@ def _release_threads_from_emails(
         if podling and podling.casefold() not in subject.casefold():
             continue
         grouped.setdefault(_thread_key(email), []).append(email)
-    threads = [_thread_summary(max(items, key=lambda item: item.get("epoch") or 0), len(items)) for items in grouped.values()]
+    threads = [
+        _thread_summary(max(items, key=lambda item: item.get("epoch") or 0), len(items))
+        for items in grouped.values()
+    ]
     threads.sort(key=lambda item: item.get("latest_epoch") or 0, reverse=True)
     return threads
 
@@ -480,9 +492,17 @@ def cache_mail_stats(
     written: list[dict[str, str]] = []
     for email in stats["emails"]:
         cache_id = cache_key(str(email["id"]))
-        payload = {**email, "cached_at": cached_at, "source_query": query, "source_timespan": timespan}
+        payload = {
+            **email,
+            "cached_at": cached_at,
+            "source_query": query,
+            "source_timespan": timespan,
+        }
         path = base / f"{cache_id}.json"
-        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         written.append({"id": str(email["id"]), "cache_id": cache_id, "path": str(path)})
     return {
         "cache_dir": str(base),
@@ -521,7 +541,9 @@ def load_cached_mail(
             continue
         if not isinstance(item, dict):
             continue
-        haystack = "\n".join(str(item.get(key, "")) for key in ("subject", "from", "message_id", "id"))
+        haystack = "\n".join(
+            str(item.get(key, "")) for key in ("subject", "from", "message_id", "id")
+        )
         if needle and needle not in haystack.casefold():
             continue
         rows.append({**item, "path": str(path)})

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -16,10 +16,12 @@ class ProtocolTests(unittest.TestCase):
     def test_initialize(self) -> None:
         response = protocol.handle_payload({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
 
+        assert isinstance(response, dict)
         self.assertEqual(response["result"]["serverInfo"]["name"], "apache-incubator-mail-mcp")
 
     def test_tools_list_includes_search_tool(self) -> None:
         response = protocol.handle_payload({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert isinstance(response, dict)
         names = {tool["name"] for tool in response["result"]["tools"]}
 
         self.assertIn("search_incubator_general_mail", names)
@@ -40,6 +42,7 @@ class ProtocolTests(unittest.TestCase):
             }
         )
 
+        assert isinstance(response, dict)
         self.assertEqual(response["error"]["code"], -32602)
 
 

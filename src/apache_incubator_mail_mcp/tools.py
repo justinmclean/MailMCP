@@ -13,12 +13,20 @@ from apache_incubator_mail_mcp.client import (
     cache_mbox_range,
     fetch_email,
     fetch_mail_stats,
-    find_release_result_threads as client_find_release_result_threads,
-    find_release_vote_threads as client_find_release_vote_threads,
     find_cached_mail,
     list_cached_mboxes,
     load_cached_mail,
+)
+from apache_incubator_mail_mcp.client import (
+    find_release_result_threads as client_find_release_result_threads,
+)
+from apache_incubator_mail_mcp.client import (
+    find_release_vote_threads as client_find_release_vote_threads,
+)
+from apache_incubator_mail_mcp.client import (
     podling_release_vote_history as client_podling_release_vote_history,
+)
+from apache_incubator_mail_mcp.client import (
     summarize_release_vote_thread as client_summarize_release_vote_thread,
 )
 
@@ -297,7 +305,10 @@ TOOLS: dict[str, dict[str, Any]] = {
         required=["query"],
     ),
     "get_incubator_general_email": schemas.tool_definition(
-        description="Fetch one full general@incubator.apache.org email by Pony Mail id or Message-ID.",
+        description=(
+            "Fetch one full general@incubator.apache.org email by Pony Mail id "
+            "or Message-ID."
+        ),
         handler=get_incubator_general_email,
         properties=schemas.email_properties(),
         required=["message_id"],
@@ -325,7 +336,10 @@ TOOLS: dict[str, dict[str, Any]] = {
         required=["month"],
     ),
     "cache_incubator_general_mboxes": schemas.tool_definition(
-        description="Download and cache a range of monthly general@incubator.apache.org mbox files.",
+        description=(
+            "Download and cache a range of monthly general@incubator.apache.org "
+            "mbox files."
+        ),
         handler=cache_incubator_general_mboxes,
         properties=schemas.mbox_range_cache_properties(),
         required=["start_month", "end_month"],
@@ -341,7 +355,10 @@ TOOLS: dict[str, dict[str, Any]] = {
         properties=schemas.release_thread_search_properties(),
     ),
     "find_release_result_threads": schemas.tool_definition(
-        description="Find likely Incubator release vote result threads on general@incubator.apache.org.",
+        description=(
+            "Find likely Incubator release vote result threads on "
+            "general@incubator.apache.org."
+        ),
         handler=find_release_result_threads,
         properties=schemas.release_thread_search_properties(),
     ),

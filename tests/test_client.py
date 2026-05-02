@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 import unittest
+from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,14 +89,14 @@ class ClientTests(unittest.TestCase):
             mock.patch.object(client, "fetch_email", side_effect=fake_fetch_email),
             mock.patch.object(client, "fetch_mail_stats") as fetch_mail_stats,
         ):
+            release_emails = cast(dict[str, dict[str, Any]], SAMPLE_RELEASE_STATS["emails"])
             fetch_mail_stats.return_value = {
                 "list": "general@incubator.apache.org",
                 "timespan": "lte=12M",
                 "query": "Release Apache Foo 1.2.3",
                 "hits": 3,
                 "emails": [
-                    client.normalize_summary(raw).to_dict()
-                    for raw in SAMPLE_RELEASE_STATS["emails"].values()
+                    client.normalize_summary(raw).to_dict() for raw in release_emails.values()
                 ],
                 "api_url": "https://example.test/api/stats.lua",
             }
