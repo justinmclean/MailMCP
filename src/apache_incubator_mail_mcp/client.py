@@ -16,10 +16,72 @@ DEFAULT_DOMAIN = "incubator.apache.org"
 DEFAULT_LIST_ADDRESS = f"{DEFAULT_LIST}@{DEFAULT_DOMAIN}"
 DEFAULT_TIMESPAN = "lte=1M"
 DEFAULT_SEARCH_TIMESPAN = "lte=12M"
+# Probing for existence only — Pony Mail returns firstYear/lastYear for the
+# whole archive regardless of window, so a tiny window is sufficient and
+# cheaper for the server than a multi-year scan.
+PODLING_PROBE_TIMESPAN = "lte=1M"
 USER_AGENT = "apache-incubator-mail-mcp/0.1.0"
+PODLING_PUBLIC_LISTS: tuple[str, ...] = ("dev", "users", "commits")
+PODLING_FLAT_SUFFIX = "apache.org"
+PODLING_INCUBATING_SUFFIX = "incubator.apache.org"
 REPLY_PREFIX_RE = re.compile(r"^(?:\s*(?:re|fwd?):\s*)+", re.IGNORECASE)
 SUBJECT_TAG_RE = re.compile(r"\[[^\]]+\]")
 VOTE_LINE_RE = re.compile(r"(?im)^\s*(?P<vote>[+-]1|0)\b")
+_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def list_address(list_name: str, domain: str) -> str:
+    return f"{list_name}@{domain}"
+
+
+def _list_slug(list_name: str, domain: str) -> str:
+    slug = _SLUG_RE.sub("_", list_address(list_name, domain)).strip("._-")
+    return slug or "list"
+
+
+def _is_default_target(list_name: str, domain: str) -> bool:
+    return list_name == DEFAULT_LIST and domain == DEFAULT_DOMAIN
+
+
+def _resolve_cache_root(
+    cache_dir: str | Path,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
+) -> Path:
+    """Resolve the on-disk cache directory for a given list.
+
+    For the historical general@incubator.apache.org target, returns the cache
+    directory root as-is (backward compatible with pre-existing caches). For
+    any other list/domain combination, returns a per-list subdirectory so
+    multiple lists can coexist without colliding.
+    """
+    base = Path(cache_dir).expanduser().resolve()
+    if _is_default_target(list_name, domain):
+        return base
+    return base / _list_slug(list_name, domain)
+
+
+def validate_podling_list(list_name: str) -> str:
+    if not isinstance(list_name, str):
+        raise ValueError("list_name must be a string")
+    name = list_name.strip().lower()
+    if name not in PODLING_PUBLIC_LISTS:
+        allowed = ", ".join(PODLING_PUBLIC_LISTS)
+        raise ValueError(f"podling list_name must be one of: {allowed}")
+    return name
+
+
+def validate_podling_name(podling: str) -> str:
+    if not isinstance(podling, str):
+        raise ValueError("podling must be a string")
+    name = podling.strip().lower()
+    if not name:
+        raise ValueError("podling must be a non-empty string")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name):
+        raise ValueError(
+            "podling must contain only lowercase letters, digits, dots, underscores, or hyphens"
+        )
+    return name
 
 
 @dataclass(frozen=True)
@@ -138,32 +200,37 @@ def normalize_summary(
 def fetch_mail_stats(
     *,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     timespan: str = DEFAULT_TIMESPAN,
     query: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
+    default_address = list_address(list_name, domain)
     url = _api_url(
         api_base,
         "stats.lua",
         {
-            "list": DEFAULT_LIST,
-            "domain": DEFAULT_DOMAIN,
+            "list": list_name,
+            "domain": domain,
             "d": timespan,
             "q": query,
             "emailsOnly": "true",
         },
     )
     payload = _read_json(url)
-    list_name = payload.get("list")
-    resolved_list = list_name if isinstance(list_name, str) and list_name else DEFAULT_LIST_ADDRESS
+    payload_list = payload.get("list")
+    resolved_list = (
+        payload_list if isinstance(payload_list, str) and payload_list else default_address
+    )
     emails = [item.to_dict() for item in _summaries_from_payload(payload, resolved_list)]
     emails.sort(key=lambda item: item.get("epoch") or 0, reverse=True)
     if limit is not None:
         emails = emails[:limit]
     return {
         "list": resolved_list,
-        "domain": payload.get("domain") or DEFAULT_DOMAIN,
-        "name": payload.get("name") or DEFAULT_LIST,
+        "domain": payload.get("domain") or domain,
+        "name": payload.get("name") or list_name,
         "timespan": timespan,
         "query": query,
         "hits": payload.get("hits", len(emails)),
@@ -176,6 +243,81 @@ def fetch_mail_stats(
     }
 
 
+def resolve_podling_domain(
+    *,
+    podling: str,
+    list_name: str,
+    api_base: str = DEFAULT_API_BASE,
+) -> str:
+    """Return the domain that actually serves a podling's mailing list.
+
+    Tries ``<podling>.apache.org`` first, falls back to
+    ``<podling>.incubator.apache.org``. If neither has archived activity, the
+    flat (modern) domain is returned anyway so callers see a meaningful URL.
+    """
+    podling = validate_podling_name(podling)
+    list_name = validate_podling_list(list_name)
+    candidates = [
+        f"{podling}.{PODLING_FLAT_SUFFIX}",
+        f"{podling}.{PODLING_INCUBATING_SUFFIX}",
+    ]
+    for candidate in candidates:
+        if _list_has_archive(api_base=api_base, list_name=list_name, domain=candidate):
+            return candidate
+    return candidates[0]
+
+
+def _list_has_archive(*, api_base: str, list_name: str, domain: str) -> bool:
+    url = _api_url(
+        api_base,
+        "stats.lua",
+        {
+            "list": list_name,
+            "domain": domain,
+            "d": PODLING_PROBE_TIMESPAN,
+            "emailsOnly": "true",
+        },
+    )
+    try:
+        payload = _read_json(url)
+    except (OSError, ValueError):
+        return False
+    if payload.get("firstYear") or payload.get("lastYear"):
+        return True
+    hits = payload.get("hits")
+    if isinstance(hits, int) and hits > 0:
+        return True
+    return bool(_mail_entries(payload.get("emails")))
+
+
+def fetch_podling_mail_stats(
+    *,
+    podling: str,
+    list_name: str,
+    api_base: str = DEFAULT_API_BASE,
+    timespan: str = DEFAULT_TIMESPAN,
+    query: str | None = None,
+    limit: int | None = None,
+    domain: str | None = None,
+) -> dict[str, Any]:
+    """Fetch mail stats for a podling list, auto-resolving the domain."""
+    list_name = validate_podling_list(list_name)
+    podling = validate_podling_name(podling)
+    resolved_domain = domain or resolve_podling_domain(
+        podling=podling, list_name=list_name, api_base=api_base
+    )
+    payload = fetch_mail_stats(
+        api_base=api_base,
+        list_name=list_name,
+        domain=resolved_domain,
+        timespan=timespan,
+        query=query,
+        limit=limit,
+    )
+    payload["podling"] = podling
+    return payload
+
+
 def _summaries_from_payload(payload: dict[str, Any], list_name: str) -> list[MailSummary]:
     summaries: list[MailSummary] = []
     for raw in _mail_entries(payload.get("emails")):
@@ -186,12 +328,20 @@ def _summaries_from_payload(payload: dict[str, Any], list_name: str) -> list[Mai
     return summaries
 
 
-def fetch_email(*, message_id: str, api_base: str = DEFAULT_API_BASE) -> dict[str, Any]:
+def fetch_email(
+    *,
+    message_id: str,
+    api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
+) -> dict[str, Any]:
+    # Pony Mail's email.lua looks up by id alone; list_name/domain are accepted for
+    # symmetry with the rest of the API and to inform fallbacks/normalization.
     url = _api_url(api_base, "email.lua", {"id": message_id})
     payload = _read_json(url)
     if "error" in payload:
         raise ValueError(str(payload["error"]))
-    summary = normalize_summary(payload).to_dict()
+    summary = normalize_summary(payload, list_address(list_name, domain)).to_dict()
     return {
         **summary,
         "body": payload.get("body") if isinstance(payload.get("body"), str) else "",
@@ -206,6 +356,8 @@ def fetch_email(*, message_id: str, api_base: str = DEFAULT_API_BASE) -> dict[st
 def find_release_vote_threads(
     *,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     timespan: str = DEFAULT_SEARCH_TIMESPAN,
     podling: str | None = None,
     query: str | None = None,
@@ -214,6 +366,8 @@ def find_release_vote_threads(
     """Find likely Incubator podling release vote threads."""
     return _find_release_threads(
         api_base=api_base,
+        list_name=list_name,
+        domain=domain,
         timespan=timespan,
         podling=podling,
         query=query,
@@ -225,6 +379,8 @@ def find_release_vote_threads(
 def find_release_result_threads(
     *,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     timespan: str = DEFAULT_SEARCH_TIMESPAN,
     podling: str | None = None,
     query: str | None = None,
@@ -233,6 +389,8 @@ def find_release_result_threads(
     """Find likely Incubator podling release vote result threads."""
     return _find_release_threads(
         api_base=api_base,
+        list_name=list_name,
+        domain=domain,
         timespan=timespan,
         podling=podling,
         query=query,
@@ -245,16 +403,27 @@ def summarize_release_vote_thread(
     *,
     message_id: str,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     timespan: str = DEFAULT_SEARCH_TIMESPAN,
     limit: int | None = None,
 ) -> dict[str, Any]:
     """Summarize likely votes and result messages in one release vote thread."""
-    root = fetch_email(api_base=api_base, message_id=message_id)
+    root = fetch_email(
+        api_base=api_base, list_name=list_name, domain=domain, message_id=message_id
+    )
     raw_subject = root.get("subject")
     subject = raw_subject if isinstance(raw_subject, str) else ""
     thread_key = _thread_key(root)
     search_query = _release_search_query(None, _subject_search_text(subject))
-    stats = fetch_mail_stats(api_base=api_base, timespan=timespan, query=search_query, limit=limit)
+    stats = fetch_mail_stats(
+        api_base=api_base,
+        list_name=list_name,
+        domain=domain,
+        timespan=timespan,
+        query=search_query,
+        limit=limit,
+    )
     normalized_subject = _normal_subject(subject)
     summaries = [
         item
@@ -269,7 +438,12 @@ def summarize_release_vote_thread(
     full_messages = []
     for item in summaries:
         try:
-            message = fetch_email(api_base=api_base, message_id=str(item["id"]))
+            message = fetch_email(
+                api_base=api_base,
+                list_name=list_name,
+                domain=domain,
+                message_id=str(item["id"]),
+            )
         except ValueError:
             message = item | {"body": ""}
         full_messages.append(message)
@@ -331,18 +505,24 @@ def podling_release_vote_history(
     *,
     podling: str,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     timespan: str = DEFAULT_SEARCH_TIMESPAN,
     limit: int | None = None,
 ) -> dict[str, Any]:
     """Return likely release vote and result history for one podling."""
     votes = find_release_vote_threads(
         api_base=api_base,
+        list_name=list_name,
+        domain=domain,
         timespan=timespan,
         podling=podling,
         limit=limit,
     )
     results = find_release_result_threads(
         api_base=api_base,
+        list_name=list_name,
+        domain=domain,
         timespan=timespan,
         podling=podling,
         limit=limit,
@@ -364,6 +544,8 @@ def podling_release_vote_history(
 def _find_release_threads(
     *,
     api_base: str,
+    list_name: str,
+    domain: str,
     timespan: str,
     podling: str | None,
     query: str | None,
@@ -372,7 +554,14 @@ def _find_release_threads(
 ) -> dict[str, Any]:
     default_query = "RESULT release" if kind == "result" else "VOTE release"
     search_query = _release_search_query(podling, query or default_query)
-    stats = fetch_mail_stats(api_base=api_base, timespan=timespan, query=search_query, limit=None)
+    stats = fetch_mail_stats(
+        api_base=api_base,
+        list_name=list_name,
+        domain=domain,
+        timespan=timespan,
+        query=search_query,
+        limit=None,
+    )
     predicate = _is_release_result_subject if kind == "result" else _is_release_vote_subject
     threads = _release_threads_from_emails(stats["emails"], predicate, podling)
     total = len(threads)
@@ -481,12 +670,21 @@ def cache_mail_stats(
     *,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     timespan: str = DEFAULT_TIMESPAN,
     query: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    stats = fetch_mail_stats(api_base=api_base, timespan=timespan, query=query, limit=limit)
-    base = Path(cache_dir).expanduser().resolve()
+    stats = fetch_mail_stats(
+        api_base=api_base,
+        list_name=list_name,
+        domain=domain,
+        timespan=timespan,
+        query=query,
+        limit=limit,
+    )
+    base = _resolve_cache_root(cache_dir, list_name, domain)
     base.mkdir(parents=True, exist_ok=True)
     cached_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     written: list[dict[str, str]] = []
@@ -497,6 +695,7 @@ def cache_mail_stats(
             "cached_at": cached_at,
             "source_query": query,
             "source_timespan": timespan,
+            "source_list": list_address(list_name, domain),
         }
         path = base / f"{cache_id}.json"
         path.write_text(
@@ -511,6 +710,7 @@ def cache_mail_stats(
         "messages": written,
         "source": {
             "api_base": api_base,
+            "list": list_address(list_name, domain),
             "timespan": timespan,
             "query": query,
             "hits": stats["hits"],
@@ -526,10 +726,12 @@ def cache_key(message_id: str) -> str:
 def load_cached_mail(
     *,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     query: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    base = Path(cache_dir).expanduser().resolve()
+    base = _resolve_cache_root(cache_dir, list_name, domain)
     if not base.exists():
         return {"cache_dir": str(base), "count": 0, "emails": []}
     needle = query.casefold() if query else None
@@ -558,8 +760,10 @@ def find_cached_mail(
     *,
     message_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
 ) -> dict[str, Any]:
-    base = Path(cache_dir).expanduser().resolve()
+    base = _resolve_cache_root(cache_dir, list_name, domain)
     candidates = [base / f"{cache_key(message_id)}.json"]
     if base.exists():
         candidates.extend(sorted(base.glob("*.json")))
@@ -608,14 +812,26 @@ def month_range(start_month: str, end_month: str) -> list[str]:
     return months
 
 
-def _mbox_dir(cache_dir: str | Path) -> Path:
-    return Path(cache_dir).expanduser().resolve() / "mbox"
+def _mbox_dir(
+    cache_dir: str | Path,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
+) -> Path:
+    return _resolve_cache_root(cache_dir, list_name, domain) / "mbox"
+
+
+def _mbox_filename(list_name: str, domain: str, month: str) -> str:
+    if _is_default_target(list_name, domain):
+        return f"general-incubator-{month}.mbox"
+    return f"{_list_slug(list_name, domain)}-{month}.mbox"
 
 
 def fetch_mbox(
     *,
     month: str,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     header_from: str | None = None,
     header_subject: str | None = None,
     header_body: str | None = None,
@@ -625,7 +841,7 @@ def fetch_mbox(
         api_base,
         "mbox.lua",
         {
-            "list": f"{DEFAULT_LIST}@{DEFAULT_DOMAIN}",
+            "list": list_address(list_name, domain),
             "date": resolved_month,
             "header_from": header_from,
             "header_subject": header_subject,
@@ -635,6 +851,7 @@ def fetch_mbox(
     content = _read_text(url)
     return {
         "month": resolved_month,
+        "list": list_address(list_name, domain),
         "content": content,
         "bytes": len(content.encode("utf-8")),
         "message_count": count_mbox_messages(content),
@@ -651,23 +868,28 @@ def cache_mbox(
     month: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     header_from: str | None = None,
     header_subject: str | None = None,
     header_body: str | None = None,
 ) -> dict[str, Any]:
     payload = fetch_mbox(
         api_base=api_base,
+        list_name=list_name,
+        domain=domain,
         month=month,
         header_from=header_from,
         header_subject=header_subject,
         header_body=header_body,
     )
-    base = _mbox_dir(cache_dir)
+    base = _mbox_dir(cache_dir, list_name, domain)
     base.mkdir(parents=True, exist_ok=True)
-    path = base / f"general-incubator-{payload['month']}.mbox"
+    path = base / _mbox_filename(list_name, domain, payload["month"])
     path.write_text(payload["content"], encoding="utf-8")
     metadata = {
         "month": payload["month"],
+        "list": list_address(list_name, domain),
         "path": str(path),
         "bytes": payload["bytes"],
         "message_count": payload["message_count"],
@@ -693,6 +915,8 @@ def cache_mbox_range(
     end_month: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     api_base: str = DEFAULT_API_BASE,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
     header_from: str | None = None,
     header_subject: str | None = None,
     header_body: str | None = None,
@@ -701,6 +925,8 @@ def cache_mbox_range(
         cache_mbox(
             api_base=api_base,
             cache_dir=cache_dir,
+            list_name=list_name,
+            domain=domain,
             month=month,
             header_from=header_from,
             header_subject=header_subject,
@@ -709,7 +935,8 @@ def cache_mbox_range(
         for month in month_range(start_month, end_month)
     ]
     return {
-        "cache_dir": str(_mbox_dir(cache_dir)),
+        "cache_dir": str(_mbox_dir(cache_dir, list_name, domain)),
+        "list": list_address(list_name, domain),
         "start_month": validate_month(start_month),
         "end_month": validate_month(end_month),
         "count": len(cached),
@@ -719,8 +946,13 @@ def cache_mbox_range(
     }
 
 
-def list_cached_mboxes(*, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> dict[str, Any]:
-    base = _mbox_dir(cache_dir)
+def list_cached_mboxes(
+    *,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+    list_name: str = DEFAULT_LIST,
+    domain: str = DEFAULT_DOMAIN,
+) -> dict[str, Any]:
+    base = _mbox_dir(cache_dir, list_name, domain)
     rows: list[dict[str, Any]] = []
     if base.exists():
         for path in sorted(base.glob("*.mbox")):

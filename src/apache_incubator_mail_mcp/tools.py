@@ -6,16 +6,23 @@ from apache_incubator_mail_mcp import schemas
 from apache_incubator_mail_mcp.client import (
     DEFAULT_API_BASE,
     DEFAULT_CACHE_DIR,
+    DEFAULT_DOMAIN,
+    DEFAULT_LIST,
     DEFAULT_SEARCH_TIMESPAN,
     DEFAULT_TIMESPAN,
+    PODLING_PUBLIC_LISTS,
     cache_mail_stats,
     cache_mbox,
     cache_mbox_range,
     fetch_email,
     fetch_mail_stats,
     find_cached_mail,
+    list_address,
     list_cached_mboxes,
     load_cached_mail,
+    resolve_podling_domain,
+    validate_podling_list,
+    validate_podling_name,
 )
 from apache_incubator_mail_mcp.client import (
     find_release_result_threads as client_find_release_result_threads,
@@ -77,8 +84,40 @@ def resolve_timespan(value: str | None = None, default: str = DEFAULT_TIMESPAN) 
     return optional_string(value, "timespan") or default
 
 
+def resolve_list_name(value: str | None = None, default: str = DEFAULT_LIST) -> str:
+    return optional_string(value, "list_name") or default
+
+
+def resolve_domain(value: str | None = None, default: str = DEFAULT_DOMAIN) -> str:
+    return optional_string(value, "domain") or default
+
+
+def resolve_podling(value: str) -> str:
+    return validate_podling_name(require_non_empty_string(value, "podling"))
+
+
+def resolve_podling_list_name(value: str) -> str:
+    return validate_podling_list(require_non_empty_string(value, "list_name"))
+
+
+def resolve_podling_target(
+    *,
+    podling: str,
+    list_name: str,
+    api_base: str,
+    domain: str | None,
+) -> tuple[str, str, str]:
+    """Return (podling, list_name, domain) with auto-resolution if domain absent."""
+    resolved_domain = optional_string(domain, "domain") or resolve_podling_domain(
+        podling=podling, list_name=list_name, api_base=api_base
+    )
+    return podling, list_name, resolved_domain
+
+
 def incubator_general_mail_overview(
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     timespan: str | None = None,
     query: str | None = None,
     limit: int = 25,
@@ -87,6 +126,8 @@ def incubator_general_mail_overview(
     resolved_limit = require_limit(limit)
     stats = fetch_mail_stats(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         timespan=resolve_timespan(timespan),
         query=optional_string(query, "query"),
         limit=resolved_limit,
@@ -98,6 +139,8 @@ def incubator_general_mail_overview(
 
 def recent_incubator_general_mail(
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     timespan: str | None = None,
     query: str | None = None,
     limit: int = 20,
@@ -106,6 +149,8 @@ def recent_incubator_general_mail(
     resolved_limit = require_limit(limit)
     return fetch_mail_stats(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         timespan=resolve_timespan(timespan),
         query=optional_string(query, "query"),
         limit=resolved_limit,
@@ -115,6 +160,8 @@ def recent_incubator_general_mail(
 def search_incubator_general_mail(
     query: str,
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     timespan: str | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
@@ -123,22 +170,33 @@ def search_incubator_general_mail(
     resolved_query = require_non_empty_string(query, "query")
     return fetch_mail_stats(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
         query=resolved_query,
         limit=resolved_limit,
     )
 
 
-def get_incubator_general_email(message_id: str, api_base: str | None = None) -> dict[str, Any]:
+def get_incubator_general_email(
+    message_id: str,
+    api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
+) -> dict[str, Any]:
     """Fetch one full Incubator general list email."""
     return fetch_email(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         message_id=require_non_empty_string(message_id, "message_id"),
     )
 
 
 def cache_incubator_general_mail(
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     cache_dir: str | None = None,
     timespan: str | None = None,
     query: str | None = None,
@@ -147,6 +205,8 @@ def cache_incubator_general_mail(
     """Cache Incubator general list message summaries locally."""
     return cache_mail_stats(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         cache_dir=resolve_cache_dir(cache_dir),
         timespan=resolve_timespan(timespan),
         query=optional_string(query, "query"),
@@ -156,12 +216,16 @@ def cache_incubator_general_mail(
 
 def list_cached_incubator_general_mail(
     cache_dir: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     query: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """List cached Incubator general list message summaries."""
     return load_cached_mail(
         cache_dir=resolve_cache_dir(cache_dir),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         query=optional_string(query, "query"),
         limit=require_limit(limit),
     )
@@ -170,10 +234,14 @@ def list_cached_incubator_general_mail(
 def get_cached_incubator_general_email(
     message_id: str,
     cache_dir: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
 ) -> dict[str, Any]:
     """Return one cached Incubator general list message summary."""
     return find_cached_mail(
         cache_dir=resolve_cache_dir(cache_dir),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         message_id=require_non_empty_string(message_id, "message_id"),
     )
 
@@ -181,6 +249,8 @@ def get_cached_incubator_general_email(
 def cache_incubator_general_mbox(
     month: str,
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     cache_dir: str | None = None,
     header_from: str | None = None,
     header_subject: str | None = None,
@@ -189,6 +259,8 @@ def cache_incubator_general_mbox(
     """Download and cache one monthly mbox for the Incubator general list."""
     return cache_mbox(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         cache_dir=resolve_cache_dir(cache_dir),
         month=require_non_empty_string(month, "month"),
         header_from=optional_string(header_from, "header_from"),
@@ -201,6 +273,8 @@ def cache_incubator_general_mboxes(
     start_month: str,
     end_month: str,
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     cache_dir: str | None = None,
     header_from: str | None = None,
     header_subject: str | None = None,
@@ -209,6 +283,8 @@ def cache_incubator_general_mboxes(
     """Download and cache a range of monthly mboxes for the Incubator general list."""
     return cache_mbox_range(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         cache_dir=resolve_cache_dir(cache_dir),
         start_month=require_non_empty_string(start_month, "start_month"),
         end_month=require_non_empty_string(end_month, "end_month"),
@@ -218,13 +294,23 @@ def cache_incubator_general_mboxes(
     )
 
 
-def list_cached_incubator_general_mboxes(cache_dir: str | None = None) -> dict[str, Any]:
+def list_cached_incubator_general_mboxes(
+    cache_dir: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
+) -> dict[str, Any]:
     """List cached monthly mbox files for the Incubator general list."""
-    return list_cached_mboxes(cache_dir=resolve_cache_dir(cache_dir))
+    return list_cached_mboxes(
+        cache_dir=resolve_cache_dir(cache_dir),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
+    )
 
 
 def find_release_vote_threads(
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     timespan: str | None = None,
     podling: str | None = None,
     query: str | None = None,
@@ -233,6 +319,8 @@ def find_release_vote_threads(
     """Find likely Incubator release vote threads."""
     return client_find_release_vote_threads(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
         podling=optional_string(podling, "podling"),
         query=optional_string(query, "query"),
@@ -242,6 +330,8 @@ def find_release_vote_threads(
 
 def find_release_result_threads(
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     timespan: str | None = None,
     podling: str | None = None,
     query: str | None = None,
@@ -250,6 +340,8 @@ def find_release_result_threads(
     """Find likely Incubator release vote result threads."""
     return client_find_release_result_threads(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
         podling=optional_string(podling, "podling"),
         query=optional_string(query, "query"),
@@ -260,12 +352,16 @@ def find_release_result_threads(
 def summarize_release_vote_thread(
     message_id: str,
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     timespan: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """Summarize likely votes and results in one Incubator release vote thread."""
     return client_summarize_release_vote_thread(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
         message_id=require_non_empty_string(message_id, "message_id"),
         limit=require_limit(limit),
@@ -275,16 +371,336 @@ def summarize_release_vote_thread(
 def podling_release_vote_history(
     podling: str,
     api_base: str | None = None,
+    list_name: str | None = None,
+    domain: str | None = None,
     timespan: str | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
     """Return likely release vote and result history for one podling."""
     return client_podling_release_vote_history(
         api_base=resolve_api_base(api_base),
+        list_name=resolve_list_name(list_name),
+        domain=resolve_domain(domain),
         timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
         podling=require_non_empty_string(podling, "podling"),
         limit=require_limit(limit),
     )
+
+
+# ---------------------------------------------------------------------------
+# Podling public mailing list tools (dev / users / commits).
+# Each accepts `podling` plus `list_name`, auto-resolving the domain to either
+# <podling>.apache.org (modern flat) or <podling>.incubator.apache.org (legacy).
+# ---------------------------------------------------------------------------
+
+
+def resolve_podling_mail_domain(
+    podling: str,
+    list_name: str,
+    api_base: str | None = None,
+) -> dict[str, Any]:
+    """Probe Pony Mail to determine the working domain for a podling list."""
+    pod = resolve_podling(podling)
+    name = resolve_podling_list_name(list_name)
+    base = resolve_api_base(api_base)
+    resolved = resolve_podling_domain(podling=pod, list_name=name, api_base=base)
+    return {
+        "podling": pod,
+        "list_name": name,
+        "domain": resolved,
+        "list": list_address(name, resolved),
+        "candidates": [f"{pod}.apache.org", f"{pod}.incubator.apache.org"],
+    }
+
+
+def podling_mail_overview(
+    podling: str,
+    list_name: str,
+    api_base: str | None = None,
+    domain: str | None = None,
+    timespan: str | None = None,
+    query: str | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Return a high-level summary of a podling public mailing list."""
+    base = resolve_api_base(api_base)
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=base,
+        domain=domain,
+    )
+    stats = fetch_mail_stats(
+        api_base=base,
+        list_name=name,
+        domain=resolved_domain,
+        timespan=resolve_timespan(timespan),
+        query=optional_string(query, "query"),
+        limit=require_limit(limit),
+    )
+    return {key: value for key, value in stats.items() if key != "emails"} | {
+        "podling": pod,
+        "sample": stats["emails"],
+    }
+
+
+def recent_podling_mail(
+    podling: str,
+    list_name: str,
+    api_base: str | None = None,
+    domain: str | None = None,
+    timespan: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Return recent message summaries from a podling public mailing list."""
+    base = resolve_api_base(api_base)
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=base,
+        domain=domain,
+    )
+    payload = fetch_mail_stats(
+        api_base=base,
+        list_name=name,
+        domain=resolved_domain,
+        timespan=resolve_timespan(timespan),
+        query=optional_string(query, "query"),
+        limit=require_limit(limit),
+    )
+    payload["podling"] = pod
+    return payload
+
+
+def search_podling_mail(
+    podling: str,
+    list_name: str,
+    query: str,
+    api_base: str | None = None,
+    domain: str | None = None,
+    timespan: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search a podling public mailing list."""
+    base = resolve_api_base(api_base)
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=base,
+        domain=domain,
+    )
+    payload = fetch_mail_stats(
+        api_base=base,
+        list_name=name,
+        domain=resolved_domain,
+        timespan=resolve_timespan(timespan, DEFAULT_SEARCH_TIMESPAN),
+        query=require_non_empty_string(query, "query"),
+        limit=require_limit(limit),
+    )
+    payload["podling"] = pod
+    return payload
+
+
+def get_podling_email(
+    podling: str,
+    list_name: str,
+    message_id: str,
+    api_base: str | None = None,
+    domain: str | None = None,
+) -> dict[str, Any]:
+    """Fetch one full email from a podling public mailing list."""
+    base = resolve_api_base(api_base)
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=base,
+        domain=domain,
+    )
+    email = fetch_email(
+        api_base=base,
+        list_name=name,
+        domain=resolved_domain,
+        message_id=require_non_empty_string(message_id, "message_id"),
+    )
+    email["podling"] = pod
+    return email
+
+
+def cache_podling_mail(
+    podling: str,
+    list_name: str,
+    api_base: str | None = None,
+    domain: str | None = None,
+    cache_dir: str | None = None,
+    timespan: str | None = None,
+    query: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Cache podling public list message summaries locally."""
+    base = resolve_api_base(api_base)
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=base,
+        domain=domain,
+    )
+    result = cache_mail_stats(
+        api_base=base,
+        list_name=name,
+        domain=resolved_domain,
+        cache_dir=resolve_cache_dir(cache_dir),
+        timespan=resolve_timespan(timespan),
+        query=optional_string(query, "query"),
+        limit=require_limit(limit),
+    )
+    result["podling"] = pod
+    return result
+
+
+def list_cached_podling_mail(
+    podling: str,
+    list_name: str,
+    domain: str | None = None,
+    cache_dir: str | None = None,
+    query: str | None = None,
+    limit: int = 50,
+    api_base: str | None = None,
+) -> dict[str, Any]:
+    """List cached podling public list message summaries."""
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=resolve_api_base(api_base),
+        domain=domain,
+    )
+    result = load_cached_mail(
+        cache_dir=resolve_cache_dir(cache_dir),
+        list_name=name,
+        domain=resolved_domain,
+        query=optional_string(query, "query"),
+        limit=require_limit(limit),
+    )
+    result["podling"] = pod
+    result["list"] = list_address(name, resolved_domain)
+    return result
+
+
+def get_cached_podling_email(
+    podling: str,
+    list_name: str,
+    message_id: str,
+    domain: str | None = None,
+    cache_dir: str | None = None,
+    api_base: str | None = None,
+) -> dict[str, Any]:
+    """Return one cached podling public list message summary."""
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=resolve_api_base(api_base),
+        domain=domain,
+    )
+    result = find_cached_mail(
+        cache_dir=resolve_cache_dir(cache_dir),
+        list_name=name,
+        domain=resolved_domain,
+        message_id=require_non_empty_string(message_id, "message_id"),
+    )
+    result["podling"] = pod
+    return result
+
+
+def cache_podling_mbox(
+    podling: str,
+    list_name: str,
+    month: str,
+    api_base: str | None = None,
+    domain: str | None = None,
+    cache_dir: str | None = None,
+    header_from: str | None = None,
+    header_subject: str | None = None,
+    header_body: str | None = None,
+) -> dict[str, Any]:
+    """Download and cache one monthly mbox for a podling public list."""
+    base = resolve_api_base(api_base)
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=base,
+        domain=domain,
+    )
+    result = cache_mbox(
+        api_base=base,
+        list_name=name,
+        domain=resolved_domain,
+        cache_dir=resolve_cache_dir(cache_dir),
+        month=require_non_empty_string(month, "month"),
+        header_from=optional_string(header_from, "header_from"),
+        header_subject=optional_string(header_subject, "header_subject"),
+        header_body=optional_string(header_body, "header_body"),
+    )
+    result["podling"] = pod
+    return result
+
+
+def cache_podling_mboxes(
+    podling: str,
+    list_name: str,
+    start_month: str,
+    end_month: str,
+    api_base: str | None = None,
+    domain: str | None = None,
+    cache_dir: str | None = None,
+    header_from: str | None = None,
+    header_subject: str | None = None,
+    header_body: str | None = None,
+) -> dict[str, Any]:
+    """Download and cache a range of monthly mboxes for a podling public list."""
+    base = resolve_api_base(api_base)
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=base,
+        domain=domain,
+    )
+    result = cache_mbox_range(
+        api_base=base,
+        list_name=name,
+        domain=resolved_domain,
+        cache_dir=resolve_cache_dir(cache_dir),
+        start_month=require_non_empty_string(start_month, "start_month"),
+        end_month=require_non_empty_string(end_month, "end_month"),
+        header_from=optional_string(header_from, "header_from"),
+        header_subject=optional_string(header_subject, "header_subject"),
+        header_body=optional_string(header_body, "header_body"),
+    )
+    result["podling"] = pod
+    return result
+
+
+def list_cached_podling_mboxes(
+    podling: str,
+    list_name: str,
+    domain: str | None = None,
+    cache_dir: str | None = None,
+    api_base: str | None = None,
+) -> dict[str, Any]:
+    """List cached monthly mbox files for a podling public list."""
+    pod, name, resolved_domain = resolve_podling_target(
+        podling=resolve_podling(podling),
+        list_name=resolve_podling_list_name(list_name),
+        api_base=resolve_api_base(api_base),
+        domain=domain,
+    )
+    result = list_cached_mboxes(
+        cache_dir=resolve_cache_dir(cache_dir),
+        list_name=name,
+        domain=resolved_domain,
+    )
+    result["podling"] = pod
+    result["list"] = list_address(name, resolved_domain)
+    return result
 
 
 TOOLS: dict[str, dict[str, Any]] = {
@@ -373,5 +789,78 @@ TOOLS: dict[str, dict[str, Any]] = {
         handler=podling_release_vote_history,
         properties=schemas.podling_history_properties(),
         required=["podling"],
+    ),
+    "resolve_podling_mail_domain": schemas.tool_definition(
+        description=(
+            "Resolve the working Pony Mail domain for a podling list. "
+            "Probes <podling>.apache.org first, falls back to "
+            "<podling>.incubator.apache.org."
+        ),
+        handler=resolve_podling_mail_domain,
+        properties=schemas.podling_resolve_properties(),
+        required=["podling", "list_name"],
+    ),
+    "podling_mail_overview": schemas.tool_definition(
+        description=(
+            "Return a high-level summary of a podling public mailing list "
+            "(dev, users, or commits)."
+        ),
+        handler=podling_mail_overview,
+        properties=schemas.podling_live_query_properties(),
+        required=["podling", "list_name"],
+    ),
+    "recent_podling_mail": schemas.tool_definition(
+        description="Return recent message summaries from a podling public mailing list.",
+        handler=recent_podling_mail,
+        properties=schemas.podling_live_query_properties(),
+        required=["podling", "list_name"],
+    ),
+    "search_podling_mail": schemas.tool_definition(
+        description="Search a podling public mailing list (dev, users, or commits).",
+        handler=search_podling_mail,
+        properties=schemas.podling_live_query_properties(),
+        required=["podling", "list_name", "query"],
+    ),
+    "get_podling_email": schemas.tool_definition(
+        description="Fetch one full email from a podling public mailing list.",
+        handler=get_podling_email,
+        properties=schemas.podling_email_properties(),
+        required=["podling", "list_name", "message_id"],
+    ),
+    "cache_podling_mail": schemas.tool_definition(
+        description="Cache podling public list message summaries locally.",
+        handler=cache_podling_mail,
+        properties=schemas.podling_cache_properties(),
+        required=["podling", "list_name"],
+    ),
+    "list_cached_podling_mail": schemas.tool_definition(
+        description="List cached podling public list message summaries.",
+        handler=list_cached_podling_mail,
+        properties=schemas.podling_cached_list_properties(),
+        required=["podling", "list_name"],
+    ),
+    "get_cached_podling_email": schemas.tool_definition(
+        description="Return one cached podling public list message summary.",
+        handler=get_cached_podling_email,
+        properties=schemas.podling_cached_email_properties(),
+        required=["podling", "list_name", "message_id"],
+    ),
+    "cache_podling_mbox": schemas.tool_definition(
+        description="Download and cache one monthly mbox file for a podling public list.",
+        handler=cache_podling_mbox,
+        properties=schemas.podling_mbox_cache_properties(),
+        required=["podling", "list_name", "month"],
+    ),
+    "cache_podling_mboxes": schemas.tool_definition(
+        description="Download and cache a range of monthly mboxes for a podling public list.",
+        handler=cache_podling_mboxes,
+        properties=schemas.podling_mbox_range_cache_properties(),
+        required=["podling", "list_name", "start_month", "end_month"],
+    ),
+    "list_cached_podling_mboxes": schemas.tool_definition(
+        description="List cached monthly mbox files for a podling public list.",
+        handler=list_cached_podling_mboxes,
+        properties=schemas.podling_cached_mbox_properties(),
+        required=["podling", "list_name"],
     ),
 }

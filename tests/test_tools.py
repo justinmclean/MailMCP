@@ -47,6 +47,69 @@ class ToolsTests(unittest.TestCase):
             "string",
         )
 
+    def test_podling_tools_registered(self) -> None:
+        expected = {
+            "resolve_podling_mail_domain",
+            "podling_mail_overview",
+            "recent_podling_mail",
+            "search_podling_mail",
+            "get_podling_email",
+            "cache_podling_mail",
+            "list_cached_podling_mail",
+            "get_cached_podling_email",
+            "cache_podling_mbox",
+            "cache_podling_mboxes",
+            "list_cached_podling_mboxes",
+        }
+        self.assertTrue(expected.issubset(tools.TOOLS.keys()))
+
+    def test_podling_mail_overview_targets_resolved_domain(self) -> None:
+        captured: list[str] = []
+
+        def fake_read_json(url: str) -> dict:
+            captured.append(url)
+            # The flat domain probe returns empty; the legacy subdomain probe
+            # (and any subsequent data fetch against it) returns sample data.
+            if "domain=iceberg.apache.org" in url:
+                return {"hits": 0, "firstYear": None, "lastYear": None, "emails": []}
+            return {**SAMPLE_STATS, "list": "dev@iceberg.incubator.apache.org"}
+
+        with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
+            result = tools.podling_mail_overview(
+                podling="Iceberg", list_name="dev", limit=1
+            )
+
+        self.assertEqual(result["podling"], "iceberg")
+        self.assertEqual(result["list"], "dev@iceberg.incubator.apache.org")
+        # The data-fetching call should target the legacy subdomain.
+        data_url = captured[-1]
+        self.assertIn("list=dev", data_url)
+        self.assertIn("domain=iceberg.incubator.apache.org", data_url)
+
+    def test_podling_tools_require_known_list_name(self) -> None:
+        with self.assertRaises(ValueError):
+            tools.podling_mail_overview(podling="iceberg", list_name="private")
+
+    def test_resolve_podling_mail_domain_tool(self) -> None:
+        with mock.patch.object(
+            client,
+            "_read_json",
+            return_value={"hits": 1, "firstYear": 2024, "lastYear": 2024, "emails": []},
+        ):
+            result = tools.resolve_podling_mail_domain(podling="pekko", list_name="dev")
+        self.assertEqual(result["domain"], "pekko.apache.org")
+        self.assertEqual(result["list"], "dev@pekko.apache.org")
+        self.assertEqual(
+            result["candidates"],
+            ["pekko.apache.org", "pekko.incubator.apache.org"],
+        )
+
+    def test_general_tools_accept_list_overrides(self) -> None:
+        # Schema must expose the new optional knobs on the existing tools.
+        schema = tools.TOOLS["recent_incubator_general_mail"]["inputSchema"]
+        self.assertIn("list_name", schema["properties"])
+        self.assertIn("domain", schema["properties"])
+
 
 if __name__ == "__main__":
     unittest.main()

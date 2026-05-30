@@ -80,7 +80,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["threads"][0]["sample_message_id"], "vote-result@1735862400@")
 
     def test_summarize_release_vote_thread_counts_votes(self) -> None:
-        def fake_fetch_email(*, message_id: str, api_base: str = client.DEFAULT_API_BASE) -> dict:
+        def fake_fetch_email(*, message_id: str, **_: Any) -> dict:
             return client.normalize_summary(SAMPLE_RELEASE_EMAILS[message_id]).to_dict() | {
                 "body": SAMPLE_RELEASE_EMAILS[message_id]["body"],
             }
@@ -113,6 +113,109 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["podling"], "Foo")
         self.assertEqual(result["vote_count"], 1)
         self.assertEqual(result["result_count"], 1)
+
+    def test_fetch_mail_stats_uses_explicit_list_and_domain(self) -> None:
+        captured: dict[str, str] = {}
+
+        def fake_read_json(url: str) -> dict[str, Any]:
+            captured["url"] = url
+            return {**SAMPLE_STATS, "list": "dev@iceberg.apache.org", "domain": "iceberg.apache.org"}
+
+        with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
+            result = client.fetch_mail_stats(
+                api_base="https://example.test/api",
+                list_name="dev",
+                domain="iceberg.apache.org",
+                limit=2,
+            )
+
+        self.assertIn("list=dev", captured["url"])
+        self.assertIn("domain=iceberg.apache.org", captured["url"])
+        self.assertEqual(result["list"], "dev@iceberg.apache.org")
+        self.assertEqual(result["domain"], "iceberg.apache.org")
+
+    def test_validate_podling_list_rejects_unknown(self) -> None:
+        for name in ("dev", "users", "commits"):
+            self.assertEqual(client.validate_podling_list(name), name)
+        with self.assertRaises(ValueError):
+            client.validate_podling_list("private")
+        with self.assertRaises(ValueError):
+            client.validate_podling_list("")
+
+    def test_validate_podling_name_normalizes_and_rejects_invalid(self) -> None:
+        self.assertEqual(client.validate_podling_name("Pekko"), "pekko")
+        self.assertEqual(client.validate_podling_name("foo-bar"), "foo-bar")
+        with self.assertRaises(ValueError):
+            client.validate_podling_name("")
+        with self.assertRaises(ValueError):
+            client.validate_podling_name("bad name")
+        with self.assertRaises(ValueError):
+            client.validate_podling_name("../etc/passwd")
+
+    def test_resolve_podling_domain_prefers_flat_then_falls_back(self) -> None:
+        calls: list[str] = []
+
+        def fake_read_json(url: str) -> dict[str, Any]:
+            calls.append(url)
+            if "iceberg.apache.org" in url and "incubator" not in url:
+                return {"hits": 0, "firstYear": None, "lastYear": None, "emails": []}
+            return {"hits": 42, "firstYear": 2020, "lastYear": 2024, "emails": []}
+
+        with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
+            resolved = client.resolve_podling_domain(podling="iceberg", list_name="dev")
+
+        self.assertEqual(resolved, "iceberg.incubator.apache.org")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("iceberg.apache.org", calls[0])
+        self.assertIn("iceberg.incubator.apache.org", calls[1])
+
+    def test_resolve_podling_domain_returns_flat_when_both_empty(self) -> None:
+        empty = {"hits": 0, "firstYear": None, "lastYear": None, "emails": []}
+        with mock.patch.object(client, "_read_json", return_value=empty):
+            resolved = client.resolve_podling_domain(podling="newpod", list_name="dev")
+        self.assertEqual(resolved, "newpod.apache.org")
+
+    def test_cache_namespaces_non_default_lists(self) -> None:
+        with cache_dir() as base:
+            with mock.patch.object(client, "_read_json", return_value=SAMPLE_STATS):
+                # General list -> root of cache_dir (backward compat).
+                general = client.cache_mail_stats(cache_dir=base, limit=1)
+                # Podling list -> per-list subdirectory.
+                podling = client.cache_mail_stats(
+                    cache_dir=base,
+                    list_name="dev",
+                    domain="iceberg.apache.org",
+                    limit=1,
+                )
+                # Loading respects the same scoping.
+                from_general = client.load_cached_mail(cache_dir=base, limit=10)
+                from_podling = client.load_cached_mail(
+                    cache_dir=base,
+                    list_name="dev",
+                    domain="iceberg.apache.org",
+                    limit=10,
+                )
+
+        self.assertEqual(Path(general["cache_dir"]), Path(base).resolve())
+        self.assertEqual(
+            Path(podling["cache_dir"]).name,
+            "dev_iceberg.apache.org",
+        )
+        # Caches don't leak across list/domain scopes.
+        self.assertEqual(from_general["count"], 1)
+        self.assertEqual(from_podling["count"], 1)
+
+    def test_cache_mbox_uses_list_specific_filename(self) -> None:
+        with cache_dir() as base:
+            with mock.patch.object(client, "_read_text", return_value=SAMPLE_MBOX):
+                result = client.cache_mbox(
+                    cache_dir=base,
+                    month="2024-04",
+                    list_name="dev",
+                    domain="iceberg.apache.org",
+                )
+        self.assertEqual(Path(result["path"]).name, "dev_iceberg.apache.org-2024-04.mbox")
+        self.assertEqual(result["list"], "dev@iceberg.apache.org")
 
 
 if __name__ == "__main__":

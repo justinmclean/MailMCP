@@ -29,6 +29,26 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("find_release_vote_threads", names)
         self.assertIn("summarize_release_vote_thread", names)
 
+    def test_tools_list_includes_podling_tools(self) -> None:
+        response = protocol.handle_payload({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+        assert isinstance(response, dict)
+        names = {tool["name"] for tool in response["result"]["tools"]}
+
+        for expected in (
+            "resolve_podling_mail_domain",
+            "podling_mail_overview",
+            "recent_podling_mail",
+            "search_podling_mail",
+            "get_podling_email",
+            "cache_podling_mail",
+            "list_cached_podling_mail",
+            "get_cached_podling_email",
+            "cache_podling_mbox",
+            "cache_podling_mboxes",
+            "list_cached_podling_mboxes",
+        ):
+            self.assertIn(expected, names)
+
     def test_rejects_unknown_tool_argument(self) -> None:
         response = protocol.handle_payload(
             {
