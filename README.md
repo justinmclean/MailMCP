@@ -110,3 +110,5 @@ Cached entries for non-default lists are written to a per-list subdirectory of
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+PolicyMCP is an independent tool and is not a project of the Apache Software Foundation. Apache and related marks are trademarks of The Apache Software Foundation.
