@@ -102,8 +102,11 @@ class ClientTests(unittest.TestCase):
             }
             result = client.summarize_release_vote_thread(message_id="vote-root@1735689600@")
 
-        self.assertEqual(result["message_count"], 3)
+        # The [RESULT] mail is its own thread; it is linked, not counted as a
+        # message of the vote thread.
+        self.assertEqual(result["message_count"], 2)
         self.assertEqual(result["votes"]["binding_plus_one"], 1)
+        self.assertEqual(result["votes"]["plus_one"], 1)
         self.assertEqual(result["result"]["id"], "vote-result@1735862400@")
 
     def test_podling_release_vote_history_combines_votes_and_results(self) -> None:

@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -26,7 +27,18 @@ PODLING_FLAT_SUFFIX = "apache.org"
 PODLING_INCUBATING_SUFFIX = "incubator.apache.org"
 REPLY_PREFIX_RE = re.compile(r"^(?:\s*(?:re|fwd?):\s*)+", re.IGNORECASE)
 SUBJECT_TAG_RE = re.compile(r"\[[^\]]+\]")
-VOTE_LINE_RE = re.compile(r"(?im)^\s*(?P<vote>[+-]1|0)\b")
+# A vote is only ever read from the voter's own unquoted text: the leading
+# token of a line, with quoted material and the quoted-reply attribution
+# ("On ... wrote:") stripped first.
+VOTE_TOKEN_RE = re.compile(r"^\s*(?P<vote>[+-]1|0)(?![\w.+-])")
+QUOTED_LINE_RE = re.compile(r"^\s*>")
+ATTRIBUTION_START_RE = re.compile(r"^on\b", re.IGNORECASE)
+ATTRIBUTION_END_RE = re.compile(r"wrote:\s*$", re.IGNORECASE)
+# "non-binding", "non binding", "nonbinding" and "not binding" all mean the
+# voter said their vote does not bind; they must be tested before "binding".
+NON_BINDING_RE = re.compile(r"\b(?:non|not)[\s-]?binding\b", re.IGNORECASE)
+BINDING_RE = re.compile(r"\bbinding\b", re.IGNORECASE)
+BINDING_MARKER_RE = re.compile(r"\((?:(?:non|not)[\s-]?)?binding\b[^)]*\)", re.IGNORECASE)
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -408,13 +420,20 @@ def summarize_release_vote_thread(
     timespan: str = DEFAULT_SEARCH_TIMESPAN,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """Summarize likely votes and result messages in one release vote thread."""
+    """Summarize the votes cast in one release vote thread.
+
+    Only what the mail itself says is reported. A vote is read from the
+    sender's own unquoted text, the [VOTE] call itself never counts as a
+    vote, and the binding marker is recorded as the voter declared it
+    (``declared_binding``). Deciding whether a voter is *actually* binding
+    needs the IPMC roster and belongs to the caller, not here.
+    """
     root = fetch_email(
         api_base=api_base, list_name=list_name, domain=domain, message_id=message_id
     )
     raw_subject = root.get("subject")
     subject = raw_subject if isinstance(raw_subject, str) else ""
-    thread_key = _thread_key(root)
+    subject_core = _subject_core(subject)
     search_query = _release_search_query(None, _subject_search_text(subject))
     stats = fetch_mail_stats(
         api_base=api_base,
@@ -424,12 +443,13 @@ def summarize_release_vote_thread(
         query=search_query,
         limit=limit,
     )
-    normalized_subject = _normal_subject(subject)
+
     summaries = [
         item
         for item in stats["emails"]
-        if _thread_key(item) == thread_key
-        or _normal_subject(str(item.get("subject") or "")) == normalized_subject
+        if _in_vote_thread(item, subject_core)
+        # The lookup message anchors the thread even if the search missed it.
+        or str(item.get("id") or "") == root["id"]
     ]
     if not any(item["id"] == root["id"] for item in summaries):
         summaries.append({key: value for key, value in root.items() if key != "body"})
@@ -437,6 +457,9 @@ def summarize_release_vote_thread(
 
     full_messages = []
     for item in summaries:
+        if str(item.get("id") or "") == root["id"]:
+            full_messages.append(root)
+            continue
         try:
             message = fetch_email(
                 api_base=api_base,
@@ -447,57 +470,131 @@ def summarize_release_vote_thread(
         except ValueError:
             message = item | {"body": ""}
         full_messages.append(message)
-    messages = [
-        {
-            "id": message.get("id"),
-            "subject": message.get("subject"),
-            "from": message.get("from"),
-            "date": message.get("date"),
-            "vote": _extract_vote(message),
-            "is_result": _is_release_result_subject(str(message.get("subject") or "")),
-            "permalink": message.get("permalink"),
-        }
-        for message in full_messages
-    ]
 
-    votes = {"binding_plus_one": 0, "plus_one": 0, "zero": 0, "minus_one": 0}
-    voters: list[dict[str, Any]] = []
-    result_messages: list[dict[str, Any]] = []
-    for full_message, message_summary in zip(full_messages, messages, strict=True):
-        if message_summary["is_result"]:
-            result_messages.append(message_summary)
-        vote = message_summary["vote"]
-        if vote is None:
-            continue
-        body = str(full_message.get("body") or "")
-        binding = bool(re.search(r"\bbinding\b", body, re.IGNORECASE))
-        if vote == "+1" and binding:
-            votes["binding_plus_one"] += 1
-        elif vote == "+1":
-            votes["plus_one"] += 1
-        elif vote == "0":
-            votes["zero"] += 1
-        elif vote == "-1":
-            votes["minus_one"] += 1
-        voters.append(
+    opener_id = str(summaries[0]["id"]) if summaries else root["id"]
+    messages = []
+    for message in full_messages:
+        is_opener = _is_vote_opener(message, opener_id)
+        record = _vote_record(message, is_opener=is_opener)
+        messages.append(
             {
-                "from": message_summary["from"],
-                "vote": vote,
-                "binding": binding if vote == "+1" else False,
-                "message_id": message_summary["id"],
+                "id": message.get("id"),
+                "subject": message.get("subject"),
+                "from": message.get("from"),
+                "date": message.get("date"),
+                "epoch": message.get("epoch"),
+                "vote": record["vote"],
+                "declared_binding": record["declared_binding"],
+                "is_opener": is_opener,
+                "permalink": message.get("permalink"),
             }
         )
 
+    voters = _deduplicate_voters(messages)
+    votes = _vote_tally(voters)
+    result = _find_vote_result(stats["emails"], subject_core)
+
     return {
-        "thread": _thread_summary(root, len(summaries)),
+        "thread": _thread_summary_from_messages(summaries),
         "timespan": timespan,
         "query": search_query,
         "message_count": len(messages),
         "votes": votes,
         "voters": voters,
-        "result": result_messages[-1] if result_messages else None,
+        "result": result,
         "messages": messages,
         "api_url": stats["api_url"],
+    }
+
+
+def _in_vote_thread(email: dict[str, Any], subject_core: str) -> bool:
+    subject = str(email.get("subject") or "")
+    return _is_release_vote_subject(subject) and _subject_core(subject) == subject_core
+
+
+def _is_vote_opener(message: dict[str, Any], opener_id: str) -> bool:
+    """True for the [VOTE] call itself, which is never a vote."""
+    if str(message.get("id") or "") == opener_id:
+        return True
+    subject = str(message.get("subject") or "")
+    return not REPLY_PREFIX_RE.match(subject) and _is_release_vote_subject(subject)
+
+
+def _deduplicate_voters(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one vote per person: the last one they cast.
+
+    Voters are keyed on their display name where they have one, so the same
+    person posting from two addresses is merged.
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        if message["vote"] is None:
+            continue
+        key, name, address = _voter_identity(message.get("from"))
+        latest[key] = {
+            "from": message.get("from"),
+            "name": name,
+            "address": address,
+            "vote": message["vote"],
+            "declared_binding": message["declared_binding"],
+            "message_id": message.get("id"),
+            "date": message.get("date"),
+            "permalink": message.get("permalink"),
+        }
+    return sorted(latest.values(), key=lambda voter: str(voter.get("date") or ""))
+
+
+def _voter_identity(sender: Any) -> tuple[str, str | None, str | None]:
+    raw = str(sender or "").strip()
+    name, address = parseaddr(raw)
+    name = name.strip().strip('"').strip()
+    address = address.strip().casefold()
+    if name:
+        return " ".join(name.casefold().split()), name, address or None
+    if address:
+        return address, None, address
+    return raw.casefold() or "unknown", None, None
+
+
+def _vote_tally(voters: list[dict[str, Any]]) -> dict[str, int]:
+    tally = {
+        "plus_one": 0,
+        "zero": 0,
+        "minus_one": 0,
+        "binding_plus_one": 0,
+        "binding_zero": 0,
+        "binding_minus_one": 0,
+    }
+    names = {"+1": "plus_one", "0": "zero", "-1": "minus_one"}
+    for voter in voters:
+        name = names.get(str(voter["vote"]))
+        if name is None:
+            continue
+        tally[name] += 1
+        if voter["declared_binding"] is True:
+            tally[f"binding_{name}"] += 1
+    return tally
+
+
+def _find_vote_result(emails: list[dict[str, Any]], subject_core: str) -> dict[str, Any] | None:
+    """Link the separate [RESULT] thread for the same release candidate."""
+    candidates = [
+        email
+        for email in emails
+        if _is_release_result_subject(str(email.get("subject") or ""))
+        and _subject_core(str(email.get("subject") or "")) == subject_core
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda email: email.get("epoch") or 0)
+    return {
+        "id": latest.get("id"),
+        "subject": latest.get("subject"),
+        "from": latest.get("from"),
+        "date": latest.get("date"),
+        "epoch": latest.get("epoch"),
+        "permalink": latest.get("permalink"),
+        "thread_id": _thread_key(latest),
     }
 
 
@@ -602,26 +699,35 @@ def _release_threads_from_emails(
             continue
         if podling and podling.casefold() not in subject.casefold():
             continue
-        grouped.setdefault(_thread_key(email), []).append(email)
-    threads = [
-        _thread_summary(max(items, key=lambda item: item.get("epoch") or 0), len(items))
-        for items in grouped.values()
-    ]
+        grouped.setdefault(_normal_subject(subject), []).append(email)
+    threads = [_thread_summary_from_messages(items) for items in grouped.values()]
     threads.sort(key=lambda item: item.get("latest_epoch") or 0, reverse=True)
     return threads
 
 
-def _thread_summary(email: dict[str, Any], message_count: int) -> dict[str, Any]:
+def _thread_summary_from_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize a thread from all of its messages.
+
+    Pony Mail's stats endpoint does not return a thread id, so replies are
+    grouped by normalized subject and the thread is identified by its root
+    (earliest) message, which is what lists.apache.org permalinks use.
+    """
+    ordered = sorted(messages, key=lambda item: item.get("epoch") or 0)
+    root = ordered[0]
+    latest = ordered[-1]
     return {
-        "thread_id": _thread_key(email),
-        "subject": email.get("subject"),
-        "normalized_subject": _normal_subject(str(email.get("subject") or "")),
-        "latest_epoch": email.get("epoch"),
-        "latest_date": email.get("date"),
-        "latest_from": email.get("from"),
-        "message_count": message_count,
-        "sample_message_id": email.get("id"),
-        "permalink": email.get("permalink"),
+        "thread_id": _thread_key(root),
+        "subject": root.get("subject"),
+        "normalized_subject": _normal_subject(str(root.get("subject") or "")),
+        "root_message_id": root.get("id"),
+        "root_date": root.get("date"),
+        "root_from": root.get("from"),
+        "latest_epoch": latest.get("epoch"),
+        "latest_date": latest.get("date"),
+        "latest_from": latest.get("from"),
+        "message_count": len(ordered),
+        "sample_message_id": root.get("id"),
+        "permalink": root.get("permalink") or permalink(str(root.get("id") or "")),
     }
 
 
@@ -654,16 +760,74 @@ def _is_release_result_subject(subject: str) -> bool:
     return ("[result]" in lowered or "[results]" in lowered) and "release" in lowered
 
 
-def _extract_vote(message: dict[str, Any]) -> str | None:
-    body = str(message.get("body") or "")
-    match = VOTE_LINE_RE.search(body)
-    if match:
-        return match.group("vote")
-    subject = str(message.get("subject") or "")
-    subject_match = re.search(r"(?<!\w)([+-]1|0)(?!\w)", subject)
-    if subject_match:
-        return subject_match.group(1)
-    return None
+def _subject_core(subject: str) -> str:
+    """Normalize a subject to the release it is about, tags and Re: removed."""
+    cleaned = SUBJECT_TAG_RE.sub(" ", _strip_reply_prefix(subject))
+    return " ".join(cleaned.casefold().split())
+
+
+def unquoted_body(body: str) -> str:
+    """Return only the sender's own text.
+
+    Drops quoted lines and everything from the quoted-reply attribution
+    ("On <date>, <someone> wrote:") onwards, so a vote quoted from an earlier
+    message is never mistaken for a vote of the sender's own.
+    """
+    lines = body.splitlines()
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        if QUOTED_LINE_RE.match(line):
+            continue
+        if _is_quote_attribution(lines, index):
+            break
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _is_quote_attribution(lines: list[str], index: int) -> bool:
+    first = lines[index].strip()
+    if not ATTRIBUTION_START_RE.match(first):
+        return False
+    joined = first
+    # The attribution often wraps over the next line or two.
+    for extra in lines[index + 1 : index + 3]:
+        if ATTRIBUTION_END_RE.search(joined):
+            break
+        joined = f"{joined} {extra.strip()}"
+    return bool(ATTRIBUTION_END_RE.search(joined))
+
+
+def _vote_record(message: dict[str, Any], *, is_opener: bool) -> dict[str, Any]:
+    """Read the vote and the voter's own binding marker from one message."""
+    if is_opener:
+        return {"vote": None, "declared_binding": None}
+    body = unquoted_body(str(message.get("body") or ""))
+    for line in body.splitlines():
+        match = VOTE_TOKEN_RE.match(line)
+        if match is None:
+            continue
+        return {
+            "vote": match.group("vote"),
+            "declared_binding": _declared_binding(line, body),
+        }
+    return {"vote": None, "declared_binding": None}
+
+
+def _declared_binding(vote_line: str, body: str) -> bool | None:
+    """What the voter said about their own vote, not what the roster says.
+
+    Most voters write no marker at all, which is None (unknown), never True.
+    Whether an unmarked voter is in fact binding can only be settled against
+    the IPMC roster, which is the caller's job.
+    """
+    if NON_BINDING_RE.search(vote_line):
+        return False
+    if BINDING_RE.search(vote_line):
+        return True
+    marker = BINDING_MARKER_RE.search(body)
+    if marker is None:
+        return None
+    return not NON_BINDING_RE.search(marker.group(0))
 
 
 def cache_mail_stats(
