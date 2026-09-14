@@ -104,6 +104,31 @@ class VoteParsingTests(unittest.TestCase):
                 record = client._vote_record({"body": line}, is_opener=False)
                 self.assertEqual(record["declared_binding"], expected)
 
+    def test_ticked_template_box_is_a_vote(self) -> None:
+        # Apache Burr 0.43.0 RC1 on dev@: two binding +1s cast by ticking the
+        # box in the vote template were read as no vote at all.
+        body = (
+            "[X] +1 Release this as Apache Burr 0.43.0 (binding)\n"
+            "[ ] +0\n"
+            "[ ] -1 Do not release this package because... (reason required)\n"
+        )
+        record = client._vote_record({"body": body}, is_opener=False)
+
+        self.assertEqual(record["vote"], "+1")
+        self.assertIs(record["declared_binding"], True)
+
+    def test_other_ticked_boxes_and_plus_zero(self) -> None:
+        cases = {
+            "[x] -1 Do not release this package because the LICENSE is wrong": "-1",
+            "[ ] +1 Release this\n[X] +0\n[ ] -1 Do not release": "0",
+            "+0 (binding)": "0",
+            "[ ] +1 Release this\n[ ] +0\n[ ] -1 Do not release": None,
+        }
+        for body, expected in cases.items():
+            with self.subTest(body=body):
+                record = client._vote_record({"body": body}, is_opener=False)
+                self.assertEqual(record["vote"], expected)
+
     def test_unmarked_plus_one_is_never_counted_as_binding(self) -> None:
         tally = client._vote_tally(
             [{"vote": "+1", "declared_binding": None}, {"vote": "+1", "declared_binding": True}]

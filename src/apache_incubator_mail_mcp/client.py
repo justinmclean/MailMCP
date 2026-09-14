@@ -30,7 +30,10 @@ SUBJECT_TAG_RE = re.compile(r"\[[^\]]+\]")
 # A vote is only ever read from the voter's own unquoted text: the leading
 # token of a line, with quoted material and the quoted-reply attribution
 # ("On ... wrote:") stripped first.
-VOTE_TOKEN_RE = re.compile(r"^\s*(?P<vote>[+-]1|0)(?![\w.+-])")
+# A vote at the start of the voter's own line: "+1", "-1", "0" or "+0", or the
+# ticked box of the vote template, "[X] +1 Release this as ...". An unticked
+# "[ ] -1 Do not release ..." is the template, not a vote.
+VOTE_TOKEN_RE = re.compile(r"^\s*(?:\[[xX]\]\s*)?(?P<vote>[+-]1|\+?0)(?![\w.+-])")
 QUOTED_LINE_RE = re.compile(r"^\s*>")
 ATTRIBUTION_START_RE = re.compile(r"^on\b", re.IGNORECASE)
 ATTRIBUTION_END_RE = re.compile(r"wrote:\s*$", re.IGNORECASE)
@@ -806,8 +809,9 @@ def _vote_record(message: dict[str, Any], *, is_opener: bool) -> dict[str, Any]:
         match = VOTE_TOKEN_RE.match(line)
         if match is None:
             continue
+        vote = match.group("vote")
         return {
-            "vote": match.group("vote"),
+            "vote": "0" if vote == "+0" else vote,
             "declared_binding": _declared_binding(line, body),
         }
     return {"vote": None, "declared_binding": None}
