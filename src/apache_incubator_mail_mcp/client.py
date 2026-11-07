@@ -30,10 +30,21 @@ SUBJECT_TAG_RE = re.compile(r"\[[^\]]+\]")
 # What is left of a malformed tag, such as "RESULT]" in "RESULT][VOTE]".
 STRAY_TAG_RE = re.compile(r"\[?\b\w+\]")
 RESULT_WORD_RE = re.compile(r"\bresults?\b")
-# The opening of a result posted as a reply in the vote thread, not a new thread.
+CANCEL_WORD_RE = re.compile(r"\bcancel(?:l?ed|l?ing)?\b")
+# A result posted as a reply in the vote thread, not a new thread. Only a
+# vote that has closed counts: "has passed", "failed", "passes with 3
+# binding +1", "is closed". "Before the vote passes" is not a result.
 IN_THREAD_RESULT_RE = re.compile(
-    r"\bvote\b[\s\S]{0,120}?\b(?:has\s+)?(?:passe[sd]|failed|is\s+closed|closes?)\b"
+    r"\bvote\b[\s\S]{0,120}?\b(?:has\s+|have\s+)?(?:passed|failed)\b"
+    r"|\bvote\s+passes\s+with\b(?!\s+at\s+least)"
+    r"|\bvote\s+(?:is\s+(?:now\s+)?|has\s+been\s+)closed\b"
     r"|\bresults?\s+(?:of|for)\s+the\s+vote\b",
+    re.IGNORECASE,
+)
+# A vote cancelled in a reply rather than a [CANCEL] mail.
+IN_THREAD_CANCEL_RE = re.compile(
+    r"\[cancel\]|\b(?:cancel(?:l?ing|l?ed)?|withdraw(?:ing|n)?)\s+(?:this|the)\s+vote\b"
+    r"|\b(?:will\s+be|is|has\s+been)\s+(?:cancell?ed|withdrawn)\b",
     re.IGNORECASE,
 )
 # A new vote call rather than its result: "The vote will remain open for at
@@ -44,6 +55,8 @@ VOTE_CALL_RE = re.compile(
     r"|\bpasses\s+with\s+at\s+least\b|^\s*\[\s*\]\s*[+-]?[01]\b",
     re.IGNORECASE | re.MULTILINE,
 )
+# A call sent again by its sender within this time is a resend, not a new vote.
+RESEND_WINDOW_SECONDS = 24 * 60 * 60
 # The list relay suffix Pony Mail adds to a sender: "Name via general".
 VIA_LIST_RE = re.compile(r"\s+via\s+\S+$")
 # A vote is only ever read from the voter's own unquoted text: the leading
@@ -525,6 +538,16 @@ def summarize_release_vote_thread(
         stats["emails"], subject_core, after_epoch=summaries[0].get("epoch") if summaries else None
     )
 
+    opened = summaries[0].get("epoch") if summaries else None
+    cancels = [
+        email
+        for email in stats["emails"]
+        if _is_release_cancel_subject(str(email.get("subject") or ""))
+        and _subject_core(str(email.get("subject") or "")) == subject_core
+        and (opened is None or (email.get("epoch") or 0) >= opened)
+    ]
+    cancel = min(cancels, key=lambda email: email.get("epoch") or 0) if cancels else None
+
     return {
         "thread": _thread_summary_from_messages(summaries),
         "timespan": timespan,
@@ -533,6 +556,17 @@ def summarize_release_vote_thread(
         "votes": votes,
         "voters": voters,
         "result": result,
+        "cancelled": (
+            {
+                "id": cancel.get("id"),
+                "subject": cancel.get("subject"),
+                "from": cancel.get("from"),
+                "date": cancel.get("date"),
+                "permalink": cancel.get("permalink"),
+            }
+            if cancel
+            else None
+        ),
         "messages": messages,
         "api_url": stats["api_url"],
     }
@@ -669,6 +703,7 @@ def podling_release_vote_history(
     )
     vote_threads = votes["threads"]
     result_threads = results["threads"]
+    _link_cancels_to_votes(vote_threads, votes.get("cancel_threads") or [])
     _link_results_to_votes(
         vote_threads, result_threads, api_base=api_base, list_name=list_name, domain=domain
     )
@@ -677,6 +712,7 @@ def podling_release_vote_history(
         "timespan": timespan,
         "vote_count": votes["returned"],
         "result_count": results["returned"],
+        "cancel_count": len(votes.get("cancel_threads") or []),
         "votes": vote_threads,
         "results": result_threads,
         "sources": {
@@ -684,6 +720,28 @@ def podling_release_vote_history(
             "results_api_url": results["api_url"],
         },
     }
+
+
+def _link_cancels_to_votes(
+    vote_threads: list[dict[str, Any]], cancel_threads: list[dict[str, Any]]
+) -> None:
+    """Mark each vote closed by a later [CANCEL] mail for the same release."""
+    for vote in sorted(vote_threads, key=lambda item: item.get("root_epoch") or 0):
+        key = _release_key(str(vote.get("subject") or ""))
+        vote_epoch = vote.get("root_epoch") or 0
+        cancels = [
+            cancel
+            for cancel in cancel_threads
+            if _release_key(str(cancel.get("subject") or "")) == key
+            and (cancel.get("root_epoch") or 0) >= vote_epoch
+            and not cancel.get("_used")
+        ]
+        if cancels:
+            cancel = min(cancels, key=lambda item: item.get("root_epoch") or 0)
+            cancel["_used"] = True
+            vote["result"] = _result_link(cancel, "cancelled")
+    for cancel in cancel_threads:
+        cancel.pop("_used", None)
 
 
 def _link_results_to_votes(
@@ -718,9 +776,16 @@ def _link_results_to_votes(
             result["vote_level"] = "ppmc"
         else:
             result["vote_level"] = "ipmc"
-        for vote in matches:
-            if "result" not in vote and (vote.get("root_epoch") or 0) <= result_epoch:
-                vote["result"] = _result_link(result, "result_thread")
+        # A result closes the latest vote opened before it, not an earlier
+        # vote on the same release that was cancelled or called again.
+        earlier = [
+            vote
+            for vote in matches
+            if "result" not in vote and (vote.get("root_epoch") or 0) <= result_epoch
+        ]
+        if earlier:
+            vote = max(earlier, key=lambda item: item.get("root_epoch") or 0)
+            vote["result"] = _result_link(result, "result_thread")
 
     for vote in vote_threads:
         if "result" in vote:
@@ -740,14 +805,19 @@ def _link_results_to_votes(
         except (OSError, ValueError):
             continue
         body = unquoted_body(str(message.get("body") or ""))
-        if IN_THREAD_RESULT_RE.search(body) and not VOTE_CALL_RE.search(body):
-            vote["result"] = {
-                "source": "reply_in_vote_thread",
-                "id": latest_id,
-                "from": vote.get("latest_from"),
-                "date": vote.get("latest_date"),
-                "permalink": permalink(str(latest_id)),
-            }
+        if IN_THREAD_CANCEL_RE.search(body):
+            source = "cancelled_in_vote_thread"
+        elif IN_THREAD_RESULT_RE.search(body) and not VOTE_CALL_RE.search(body):
+            source = "reply_in_vote_thread"
+        else:
+            continue
+        vote["result"] = {
+            "source": source,
+            "id": latest_id,
+            "from": vote.get("latest_from"),
+            "date": vote.get("latest_date"),
+            "permalink": permalink(str(latest_id)),
+        }
 
 
 def _sender_key(sender: Any) -> str:
@@ -771,21 +841,38 @@ def _split_same_subject_threads(messages: list[dict[str, Any]]) -> list[list[dic
     threads: list[list[dict[str, Any]]] = []
     for message in sorted(messages, key=lambda item: item.get("epoch") or 0):
         is_reply = bool(REPLY_PREFIX_RE.match(str(message.get("subject") or "")))
-        if threads and is_reply:
+        if threads and (is_reply or _is_resend(threads[-1], message)):
             threads[-1].append(message)
         else:
             threads.append([message])
     return threads
 
 
+def _is_resend(thread: list[dict[str, Any]], message: dict[str, Any]) -> bool:
+    """True for the same call sent again soon after, before anyone else replied.
+
+    A release manager sometimes sends a call twice within minutes. A call
+    sent after someone else has replied, such as after a -1, is a new vote.
+    """
+    opener = thread[0]
+    sender = _sender_key(opener.get("from"))
+    gap = (message.get("epoch") or 0) - (opener.get("epoch") or 0)
+    return (
+        0 <= gap <= RESEND_WINDOW_SECONDS
+        and _sender_key(message.get("from")) == sender
+        and all(_sender_key(item.get("from")) == sender for item in thread)
+    )
+
+
 def _release_key(subject: str) -> str:
     """Reduce a subject to the release candidate it names.
 
     Podlings name the same candidate differently from one mail to the next:
-    "Apache Fluss 0.9.1-incubating (RC1)", "Fluss 0.9.1-incubating-rc1".
+    "Apache Fluss 0.9.1-incubating (RC1)", "Fluss 0.9.1-incubating-rc1",
+    "Cloudberry, Incubating, 2.2.0-rc2".
     """
     core = _subject_core(subject)
-    core = re.sub(r"\bapache\b|\(?\bincubating\b\)?|[()]", " ", core)
+    core = re.sub(r"\bapache\b|\(?\bincubating\b\)?|[(),]", " ", core)
     core = re.sub(r"[-_\s]+rc\s*(\d+)", r" rc\1", core)
     core = re.sub(r"(\d)-(?=\s|$)", r"\1", core)
     return " ".join(core.split())
@@ -824,6 +911,11 @@ def _find_release_threads(
     )
     predicate = _is_release_result_subject if kind == "result" else _is_release_vote_subject
     threads = _release_threads_from_emails(stats["emails"], predicate, podling)
+    cancel_threads = (
+        _release_threads_from_emails(stats["emails"], _is_release_cancel_subject, podling)
+        if kind == "vote"
+        else []
+    )
     total = len(threads)
     if limit is not None:
         threads = threads[:limit]
@@ -836,6 +928,7 @@ def _find_release_threads(
         "count": total,
         "returned": len(threads),
         "threads": threads,
+        "cancel_threads": cancel_threads,
         "api_url": stats["api_url"],
     }
 
@@ -919,9 +1012,19 @@ def _strip_reply_prefix(subject: str) -> str:
 
 def _is_release_vote_subject(subject: str) -> bool:
     lowered = subject.casefold()
-    if RESULT_WORD_RE.search(lowered):
+    if RESULT_WORD_RE.search(lowered) or CANCEL_WORD_RE.search(lowered):
         return False
     return "[vote]" in lowered and "release" in lowered
+
+
+def _is_release_cancel_subject(subject: str) -> bool:
+    lowered = subject.casefold()
+    return (
+        bool(CANCEL_WORD_RE.search(lowered))
+        and not RESULT_WORD_RE.search(lowered)
+        and "vote" in lowered
+        and "release" in lowered
+    )
 
 
 def _is_release_result_subject(subject: str) -> bool:
