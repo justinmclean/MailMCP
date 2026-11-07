@@ -446,6 +446,27 @@ class ClientTests(unittest.TestCase):
         ]
         self.assertEqual([item["id"] for item in client._unique_messages(emails)], ["a", "c"])
 
+    def test_cancel_and_result_subject_variants_match_their_vote(self) -> None:
+        vote = client._release_key("[VOTE] Release Apache Fesod (Incubating) 2.1.0-incubating RC2")
+        self.assertTrue(
+            client._is_release_cancel_subject(
+                "[CANCEL] Apache Fesod (Incubating) 2.1.0-incubating RC2"
+            )
+        )
+        self.assertEqual(
+            client._release_key("[CANCEL] Apache Fesod (Incubating) 2.1.0-incubating RC2"), vote
+        )
+        self.assertEqual(
+            client._release_key(
+                "[RESULT] [VOTE] Release Apache Asyncband (Incubating) 0.7.2 PASSED"
+            ),
+            client._release_key("[VOTE] Release Asyncband (Incubating) 0.7.2"),
+        )
+        self.assertEqual(
+            client._release_key("[WIP] - Re: [CANCEL][VOTE] Release Apache Foo 0.7.0 RC1"),
+            client._release_key("[VOTE] Release Apache Foo 0.7.0 RC1"),
+        )
+
     def test_sender_key_ignores_the_list_relay_name(self) -> None:
         self.assertEqual(
             client._sender_key("ConradJam via general <general@incubator.apache.org>"),

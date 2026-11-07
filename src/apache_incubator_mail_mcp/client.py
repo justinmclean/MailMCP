@@ -741,7 +741,14 @@ def podling_release_vote_history(
         "timespan": timespan,
         "vote_count": votes["returned"],
         "result_count": results["returned"],
-        "cancel_count": len(votes.get("cancel_threads") or []),
+        # A reply to a cancel can carry its own tag ("[WIP] - Re: [CANCEL]..."),
+        # so count the releases cancelled rather than the threads.
+        "cancel_count": len(
+            {
+                _release_key(str(item.get("subject") or ""))
+                for item in votes.get("cancel_threads") or []
+            }
+        ),
         "votes": vote_threads,
         "results": result_threads,
         "sources": {
@@ -898,10 +905,19 @@ def _release_key(subject: str) -> str:
 
     Podlings name the same candidate differently from one mail to the next:
     "Apache Fluss 0.9.1-incubating (RC1)", "Fluss 0.9.1-incubating-rc1",
-    "Cloudberry, Incubating, 2.2.0-rc2".
+    "Cloudberry, Incubating, 2.2.0-rc2". The words "release" and "vote", and
+    an outcome such as "PASSED", are dropped, since cancel and result mails
+    add or leave them out: "[CANCEL] Apache Fesod 2.1.0-incubating RC2",
+    "[RESULT] [VOTE] Release Apache Asyncband 0.7.2 PASSED".
     """
     core = _subject_core(subject)
-    core = re.sub(r"\bapache\b|\(?\bincubating\b\)?|[(),]", " ", core)
+    core = re.sub(
+        r"\bapache\b|\(?\bincubating\b\)?|[(),]"
+        r"|\b(?:release|vote|passed|failed|approved|cancell?ed)\b"
+        r"|\b(?:re|fwd?|aw|wg|sv)\s*:|(?:^|\s)-(?=\s)",
+        " ",
+        core,
+    )
     core = re.sub(r"[-_\s]+rc\s*(\d+)", r" rc\1", core)
     core = re.sub(r"(\d)-(?=\s|$)", r"\1", core)
     return " ".join(core.split())
@@ -1047,11 +1063,11 @@ def _is_release_vote_subject(subject: str) -> bool:
 
 
 def _is_release_cancel_subject(subject: str) -> bool:
+    # "[CANCEL][VOTE] Release Foo 1.2.3", or just "[CANCEL] Apache Foo 1.2.3 RC2".
     lowered = subject.casefold()
     return (
         bool(CANCEL_WORD_RE.search(lowered))
         and not RESULT_WORD_RE.search(lowered)
-        and "vote" in lowered
         and bool(RELEASE_HINT_RE.search(lowered))
     )
 
