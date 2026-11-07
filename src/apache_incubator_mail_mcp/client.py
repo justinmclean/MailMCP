@@ -27,6 +27,15 @@ PODLING_FLAT_SUFFIX = "apache.org"
 PODLING_INCUBATING_SUFFIX = "incubator.apache.org"
 REPLY_PREFIX_RE = re.compile(r"^(?:\s*(?:re|fwd?):\s*)+", re.IGNORECASE)
 SUBJECT_TAG_RE = re.compile(r"\[[^\]]+\]")
+# What is left of a malformed tag, such as "RESULT]" in "RESULT][VOTE]".
+STRAY_TAG_RE = re.compile(r"\[?\b\w+\]")
+RESULT_WORD_RE = re.compile(r"\bresults?\b")
+# The opening of a result posted as a reply in the vote thread, not a new thread.
+IN_THREAD_RESULT_RE = re.compile(
+    r"\bvote\b[\s\S]{0,120}?\b(?:has\s+)?(?:passe[sd]|failed|is\s+closed|closes?)\b"
+    r"|\bresults?\s+(?:of|for)\s+the\s+vote\b",
+    re.IGNORECASE,
+)
 # A vote is only ever read from the voter's own unquoted text: the leading
 # token of a line, with quoted material and the quoted-reply attribution
 # ("On ... wrote:") stripped first.
@@ -431,9 +440,7 @@ def summarize_release_vote_thread(
     (``declared_binding``). Deciding whether a voter is *actually* binding
     needs the IPMC roster and belongs to the caller, not here.
     """
-    root = fetch_email(
-        api_base=api_base, list_name=list_name, domain=domain, message_id=message_id
-    )
+    root = fetch_email(api_base=api_base, list_name=list_name, domain=domain, message_id=message_id)
     raw_subject = root.get("subject")
     subject = raw_subject if isinstance(raw_subject, str) else ""
     subject_core = _subject_core(subject)
@@ -627,17 +634,108 @@ def podling_release_vote_history(
         podling=podling,
         limit=limit,
     )
+    vote_threads = votes["threads"]
+    result_threads = results["threads"]
+    _link_results_to_votes(
+        vote_threads, result_threads, api_base=api_base, list_name=list_name, domain=domain
+    )
     return {
         "podling": podling,
         "timespan": timespan,
         "vote_count": votes["returned"],
         "result_count": results["returned"],
-        "votes": votes["threads"],
-        "results": results["threads"],
+        "votes": vote_threads,
+        "results": result_threads,
         "sources": {
             "votes_api_url": votes["api_url"],
             "results_api_url": results["api_url"],
         },
+    }
+
+
+def _link_results_to_votes(
+    vote_threads: list[dict[str, Any]],
+    result_threads: list[dict[str, Any]],
+    *,
+    api_base: str,
+    list_name: str,
+    domain: str,
+) -> None:
+    """Attach each vote's result and say which vote each result closes.
+
+    A PPMC result is often cross-posted to general@ with the same subject as
+    the IPMC result. It comes before the general@ vote opens, so a result
+    dated before the matching vote's root is the PPMC one. When no separate
+    result exists, the release manager may have posted it as a reply in the
+    vote thread, so the latest message is read if the opener sent it.
+    """
+    votes_by_key: dict[str, list[dict[str, Any]]] = {}
+    for vote in vote_threads:
+        votes_by_key.setdefault(_release_key(str(vote.get("subject") or "")), []).append(vote)
+
+    ordered_results = sorted(result_threads, key=lambda item: item.get("root_epoch") or 0)
+    for result in ordered_results:
+        matches = votes_by_key.get(_release_key(str(result.get("subject") or "")), [])
+        result_epoch = result.get("root_epoch") or 0
+        if not matches:
+            result["vote_level"] = "unknown"
+        elif any((vote.get("root_epoch") or 0) > result_epoch for vote in matches):
+            # Another vote on this release opened later, so this result closed
+            # the earlier PPMC vote.
+            result["vote_level"] = "ppmc"
+        else:
+            result["vote_level"] = "ipmc"
+        for vote in matches:
+            if "result" not in vote and (vote.get("root_epoch") or 0) <= result_epoch:
+                vote["result"] = _result_link(result, "result_thread")
+
+    for vote in vote_threads:
+        if "result" in vote:
+            continue
+        vote["result"] = None
+        latest_id = vote.get("latest_message_id")
+        if (
+            not latest_id
+            or latest_id == vote.get("root_message_id")
+            or vote.get("latest_from") != vote.get("root_from")
+        ):
+            continue
+        try:
+            message = fetch_email(
+                api_base=api_base, list_name=list_name, domain=domain, message_id=str(latest_id)
+            )
+        except (OSError, ValueError):
+            continue
+        if IN_THREAD_RESULT_RE.search(unquoted_body(str(message.get("body") or ""))):
+            vote["result"] = {
+                "source": "reply_in_vote_thread",
+                "id": latest_id,
+                "from": vote.get("latest_from"),
+                "date": vote.get("latest_date"),
+                "permalink": permalink(str(latest_id)),
+            }
+
+
+def _release_key(subject: str) -> str:
+    """Reduce a subject to the release candidate it names.
+
+    Podlings name the same candidate differently from one mail to the next:
+    "Apache Fluss 0.9.1-incubating (RC1)", "Fluss 0.9.1-incubating-rc1".
+    """
+    core = _subject_core(subject)
+    core = re.sub(r"\bapache\b|\(?\bincubating\b\)?|[()]", " ", core)
+    core = re.sub(r"[-_\s]+rc\s*(\d+)", r" rc\1", core)
+    core = re.sub(r"(\d)-(?=\s|$)", r"\1", core)
+    return " ".join(core.split())
+
+
+def _result_link(result: dict[str, Any], source: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "id": result.get("root_message_id"),
+        "from": result.get("root_from"),
+        "date": result.get("root_date"),
+        "permalink": result.get("permalink"),
     }
 
 
@@ -725,9 +823,11 @@ def _thread_summary_from_messages(messages: list[dict[str, Any]]) -> dict[str, A
         "root_message_id": root.get("id"),
         "root_date": root.get("date"),
         "root_from": root.get("from"),
+        "root_epoch": root.get("epoch"),
         "latest_epoch": latest.get("epoch"),
         "latest_date": latest.get("date"),
         "latest_from": latest.get("from"),
+        "latest_message_id": latest.get("id"),
         "message_count": len(ordered),
         "sample_message_id": root.get("id"),
         "permalink": root.get("permalink") or permalink(str(root.get("id") or "")),
@@ -753,19 +853,21 @@ def _strip_reply_prefix(subject: str) -> str:
 
 def _is_release_vote_subject(subject: str) -> bool:
     lowered = subject.casefold()
-    if "result" in lowered:
+    if RESULT_WORD_RE.search(lowered):
         return False
     return "[vote]" in lowered and "release" in lowered
 
 
 def _is_release_result_subject(subject: str) -> bool:
+    # Matches "[RESULT]" and malformed tags such as "RESULT][VOTE]".
     lowered = subject.casefold()
-    return ("[result]" in lowered or "[results]" in lowered) and "release" in lowered
+    return bool(RESULT_WORD_RE.search(lowered)) and "release" in lowered
 
 
 def _subject_core(subject: str) -> str:
     """Normalize a subject to the release it is about, tags and Re: removed."""
     cleaned = SUBJECT_TAG_RE.sub(" ", _strip_reply_prefix(subject))
+    cleaned = STRAY_TAG_RE.sub(" ", cleaned)
     return " ".join(cleaned.casefold().split())
 
 

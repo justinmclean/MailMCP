@@ -116,13 +116,103 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["podling"], "Foo")
         self.assertEqual(result["vote_count"], 1)
         self.assertEqual(result["result_count"], 1)
+        self.assertEqual(result["results"][0]["vote_level"], "ipmc")
+        self.assertEqual(result["votes"][0]["result"]["id"], "vote-result@1735862400@")
+
+    def test_release_result_subject_accepts_malformed_tag(self) -> None:
+        subject = "RESULT][VOTE] Release Apache Foo 1.2.3"
+        self.assertTrue(client._is_release_result_subject(subject))
+        self.assertFalse(client._is_release_vote_subject(subject))
+        self.assertEqual(
+            client._subject_core(subject), client._subject_core("[VOTE] Release Apache Foo 1.2.3")
+        )
+
+    def test_release_key_ignores_naming_variants(self) -> None:
+        self.assertEqual(
+            client._release_key("[VOTE] Release Apache Fluss 0.9.1-incubating (RC1)"),
+            client._release_key("[RESULT][VOTE] Release Fluss 0.9.1-incubating-rc1"),
+        )
+        self.assertNotEqual(
+            client._release_key("[VOTE] Release Apache Fluss 0.9.1-incubating (RC1)"),
+            client._release_key("[VOTE] Release Apache Fluss 0.9.1-incubating (RC2)"),
+        )
+
+    def test_vote_history_marks_ppmc_result_posted_before_the_vote(self) -> None:
+        def email(key: str, epoch: int, subject: str) -> dict[str, Any]:
+            return {
+                "id": f"{key}@{epoch}@",
+                "epoch": epoch,
+                "subject": subject,
+                "from": "RM <rm@apache.org>",
+            }
+
+        stats = {
+            **SAMPLE_RELEASE_STATS,
+            "emails": {
+                "ppmc": email("ppmc", 100, "[RESULT][VOTE] Release Apache Foo 1.2.3"),
+                "vote": email("vote", 200, "[VOTE] Release Apache Foo 1.2.3"),
+                "ipmc": email("ipmc", 300, "RESULT][VOTE] Release Apache Foo 1.2.3"),
+            },
+        }
+        with mock.patch.object(client, "_read_json", return_value=stats):
+            result = client.podling_release_vote_history(podling="Foo")
+
+        self.assertEqual(result["result_count"], 2)
+        levels = {item["root_message_id"]: item["vote_level"] for item in result["results"]}
+        self.assertEqual(levels, {"ppmc@100@": "ppmc", "ipmc@300@": "ipmc"})
+        self.assertEqual(result["votes"][0]["result"]["id"], "ipmc@300@")
+
+    def test_vote_history_finds_result_posted_in_vote_thread(self) -> None:
+        subject = "[VOTE] Release Apache Foo 1.2.3"
+        stats = {
+            **SAMPLE_RELEASE_STATS,
+            "emails": {
+                "vote": {
+                    "id": "vote@100@",
+                    "epoch": 100,
+                    "subject": subject,
+                    "from": "RM <rm@apache.org>",
+                },
+                "plus": {
+                    "id": "plus@200@",
+                    "epoch": 200,
+                    "subject": f"Re: {subject}",
+                    "from": "Mentor <m@apache.org>",
+                },
+                "close": {
+                    "id": "close@300@",
+                    "epoch": 300,
+                    "subject": f"Re: {subject}",
+                    "from": "RM <rm@apache.org>",
+                },
+            },
+        }
+        reply = {
+            "id": "close@300@",
+            "subject": f"Re: {subject}",
+            "body": "The vote has passed with 3 binding +1 votes.",
+        }
+
+        def fake_read_json(url: str) -> dict[str, Any]:
+            return reply if "email.lua" in url else stats
+
+        with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
+            result = client.podling_release_vote_history(podling="Foo")
+
+        self.assertEqual(result["result_count"], 0)
+        self.assertEqual(result["votes"][0]["result"]["source"], "reply_in_vote_thread")
+        self.assertEqual(result["votes"][0]["result"]["id"], "close@300@")
 
     def test_fetch_mail_stats_uses_explicit_list_and_domain(self) -> None:
         captured: dict[str, str] = {}
 
         def fake_read_json(url: str) -> dict[str, Any]:
             captured["url"] = url
-            return {**SAMPLE_STATS, "list": "dev@iceberg.apache.org", "domain": "iceberg.apache.org"}
+            return {
+                **SAMPLE_STATS,
+                "list": "dev@iceberg.apache.org",
+                "domain": "iceberg.apache.org",
+            }
 
         with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
             result = client.fetch_mail_stats(
