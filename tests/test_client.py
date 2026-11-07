@@ -203,6 +203,91 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["votes"][0]["result"]["source"], "reply_in_vote_thread")
         self.assertEqual(result["votes"][0]["result"]["id"], "close@300@")
 
+    def test_vote_history_splits_a_vote_called_again_with_the_same_subject(self) -> None:
+        subject = "[VOTE] Release Apache Foo (incubating) 0.9.0-incubating"
+        stats = {
+            **SAMPLE_RELEASE_STATS,
+            "emails": {
+                "first": {
+                    "id": "rc10@100@",
+                    "epoch": 100,
+                    "subject": subject,
+                    "from": "RM <rm@apache.org>",
+                },
+                "minus": {
+                    "id": "minus@200@",
+                    "epoch": 200,
+                    "subject": f"Re: {subject}",
+                    "from": "IPMC <i@apache.org>",
+                },
+                "again": {
+                    "id": "rc14@300@",
+                    "epoch": 300,
+                    "subject": subject,
+                    "from": "RM via general <general@incubator.apache.org>",
+                },
+            },
+        }
+        call = {
+            "id": "rc14@300@",
+            "subject": subject,
+            "body": "The vote will remain open for at least 72 hours and passes with at\n"
+            "least 3 binding +1 votes from IPMC members.\n\n[ ] +1 approve\n",
+        }
+
+        def fake_read_json(url: str) -> dict[str, Any]:
+            return call if "email.lua" in url else stats
+
+        with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
+            result = client.podling_release_vote_history(podling="Foo")
+
+        self.assertEqual(result["vote_count"], 2)
+        by_root = {vote["root_message_id"]: vote for vote in result["votes"]}
+        self.assertEqual(by_root["rc10@100@"]["message_count"], 2)
+        self.assertEqual(by_root["rc14@300@"]["message_count"], 1)
+        self.assertIsNone(by_root["rc10@100@"]["result"])
+        self.assertIsNone(by_root["rc14@300@"]["result"])
+
+    def test_vote_call_text_is_not_an_in_thread_result(self) -> None:
+        subject = "[VOTE] Release Apache Foo 1.2.3"
+        stats = {
+            **SAMPLE_RELEASE_STATS,
+            "emails": {
+                "vote": {
+                    "id": "vote@100@",
+                    "epoch": 100,
+                    "subject": subject,
+                    "from": "RM <rm@apache.org>",
+                },
+                "resend": {
+                    "id": "resend@200@",
+                    "epoch": 200,
+                    "subject": f"Re: {subject}",
+                    "from": "RM via general <general@incubator.apache.org>",
+                },
+            },
+        }
+        reply = {
+            "id": "resend@200@",
+            "subject": f"Re: {subject}",
+            "body": "Reminder: the vote will remain open for at least 72 hours and passes "
+            "with at least 3 binding +1 votes.",
+        }
+
+        def fake_read_json(url: str) -> dict[str, Any]:
+            return reply if "email.lua" in url else stats
+
+        with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
+            result = client.podling_release_vote_history(podling="Foo")
+
+        self.assertIsNone(result["votes"][0]["result"])
+
+    def test_sender_key_ignores_the_list_relay_name(self) -> None:
+        self.assertEqual(
+            client._sender_key("ConradJam via general <general@incubator.apache.org>"),
+            client._sender_key("ConradJam <cz@apache.org>"),
+        )
+
     def test_fetch_mail_stats_uses_explicit_list_and_domain(self) -> None:
         captured: dict[str, str] = {}
 

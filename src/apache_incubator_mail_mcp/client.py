@@ -36,6 +36,16 @@ IN_THREAD_RESULT_RE = re.compile(
     r"|\bresults?\s+(?:of|for)\s+the\s+vote\b",
     re.IGNORECASE,
 )
+# A new vote call rather than its result: "The vote will remain open for at
+# least 72 hours and passes with at least 3 binding +1 votes", or the
+# unticked "[ ] +1" template.
+VOTE_CALL_RE = re.compile(
+    r"\bwill\s+(?:remain\s+|be\s+)?open\b|\bopen\s+for\s+at\s+least\b"
+    r"|\bpasses\s+with\s+at\s+least\b|^\s*\[\s*\]\s*[+-]?[01]\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+# The list relay suffix Pony Mail adds to a sender: "Name via general".
+VIA_LIST_RE = re.compile(r"\s+via\s+\S+$")
 # A vote is only ever read from the voter's own unquoted text: the leading
 # token of a line, with quoted material and the quoted-reply attribution
 # ("On ... wrote:") stripped first.
@@ -463,7 +473,16 @@ def summarize_release_vote_thread(
     ]
     if not any(item["id"] == root["id"] for item in summaries):
         summaries.append({key: value for key, value in root.items() if key != "body"})
-    summaries.sort(key=lambda item: item.get("epoch") or 0)
+    # Two votes on the same subject, such as an IPMC vote that was called
+    # again, are separate threads. Keep the one this message is in.
+    summaries = next(
+        (
+            thread
+            for thread in _split_same_subject_threads(summaries)
+            if any(str(item.get("id") or "") == root["id"] for item in thread)
+        ),
+        summaries,
+    )
 
     full_messages = []
     for item in summaries:
@@ -502,7 +521,9 @@ def summarize_release_vote_thread(
 
     voters = _deduplicate_voters(messages)
     votes = _vote_tally(voters)
-    result = _find_vote_result(stats["emails"], subject_core)
+    result = _find_vote_result(
+        stats["emails"], subject_core, after_epoch=summaries[0].get("epoch") if summaries else None
+    )
 
     return {
         "thread": _thread_summary_from_messages(summaries),
@@ -586,17 +607,29 @@ def _vote_tally(voters: list[dict[str, Any]]) -> dict[str, int]:
     return tally
 
 
-def _find_vote_result(emails: list[dict[str, Any]], subject_core: str) -> dict[str, Any] | None:
-    """Link the separate [RESULT] thread for the same release candidate."""
+def _find_vote_result(
+    emails: list[dict[str, Any]], subject_core: str, *, after_epoch: Any = None
+) -> dict[str, Any] | None:
+    """Link the separate [RESULT] thread for the same release candidate.
+
+    With ``after_epoch``, the first result sent after the vote opened is
+    used, so an earlier PPMC result or an earlier vote's result is skipped.
+    """
     candidates = [
         email
         for email in emails
         if _is_release_result_subject(str(email.get("subject") or ""))
         and _subject_core(str(email.get("subject") or "")) == subject_core
     ]
-    if not candidates:
+    if after_epoch is not None:
+        candidates = [email for email in candidates if (email.get("epoch") or 0) >= after_epoch]
+        if not candidates:
+            return None
+        latest = min(candidates, key=lambda email: email.get("epoch") or 0)
+    elif not candidates:
         return None
-    latest = max(candidates, key=lambda email: email.get("epoch") or 0)
+    else:
+        latest = max(candidates, key=lambda email: email.get("epoch") or 0)
     return {
         "id": latest.get("id"),
         "subject": latest.get("subject"),
@@ -697,7 +730,7 @@ def _link_results_to_votes(
         if (
             not latest_id
             or latest_id == vote.get("root_message_id")
-            or vote.get("latest_from") != vote.get("root_from")
+            or _sender_key(vote.get("latest_from")) != _sender_key(vote.get("root_from"))
         ):
             continue
         try:
@@ -706,7 +739,8 @@ def _link_results_to_votes(
             )
         except (OSError, ValueError):
             continue
-        if IN_THREAD_RESULT_RE.search(unquoted_body(str(message.get("body") or ""))):
+        body = unquoted_body(str(message.get("body") or ""))
+        if IN_THREAD_RESULT_RE.search(body) and not VOTE_CALL_RE.search(body):
             vote["result"] = {
                 "source": "reply_in_vote_thread",
                 "id": latest_id,
@@ -714,6 +748,34 @@ def _link_results_to_votes(
                 "date": vote.get("latest_date"),
                 "permalink": permalink(str(latest_id)),
             }
+
+
+def _sender_key(sender: Any) -> str:
+    """Identify a sender across addresses and the "via <list>" relay name."""
+    raw = str(sender or "").strip()
+    name, address = parseaddr(raw)
+    name = VIA_LIST_RE.sub("", name.strip().strip('"').strip())
+    if name:
+        return " ".join(name.casefold().split())
+    return address.strip().casefold() or raw.casefold()
+
+
+def _split_same_subject_threads(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Split messages sharing one subject into threads, oldest first.
+
+    Pony Mail search returns no thread ids, so threads are grouped by
+    subject. A message without a Re: prefix opens a new thread, as when a
+    vote is called again with the same subject; replies join the thread
+    open at the time.
+    """
+    threads: list[list[dict[str, Any]]] = []
+    for message in sorted(messages, key=lambda item: item.get("epoch") or 0):
+        is_reply = bool(REPLY_PREFIX_RE.match(str(message.get("subject") or "")))
+        if threads and is_reply:
+            threads[-1].append(message)
+        else:
+            threads.append([message])
+    return threads
 
 
 def _release_key(subject: str) -> str:
@@ -801,7 +863,11 @@ def _release_threads_from_emails(
         if podling and podling.casefold() not in subject.casefold():
             continue
         grouped.setdefault(_normal_subject(subject), []).append(email)
-    threads = [_thread_summary_from_messages(items) for items in grouped.values()]
+    threads = [
+        _thread_summary_from_messages(thread)
+        for items in grouped.values()
+        for thread in _split_same_subject_threads(items)
+    ]
     threads.sort(key=lambda item: item.get("latest_epoch") or 0, reverse=True)
     return threads
 
