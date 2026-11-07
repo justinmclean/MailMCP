@@ -431,6 +431,13 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["vote_count"], 1)
         self.assertEqual(result["votes"][0]["message_count"], 2)
 
+    def test_cancel_names_the_candidate(self) -> None:
+        pattern = client.IN_THREAD_CANCEL_RE
+        self.assertIsNotNone(
+            pattern.search("We acknowledge the binding -1 and will cancel the RC1 vote.")
+        )
+        self.assertIsNone(pattern.search("Please vote on the RC1 artifacts."))
+
     def test_restarting_the_vote_cancels_it(self) -> None:
         self.assertIsNotNone(
             client.IN_THREAD_CANCEL_RE.search(

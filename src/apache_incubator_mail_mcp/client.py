@@ -55,7 +55,7 @@ IN_THREAD_RESULT_RE = re.compile(
 )
 # A vote cancelled in a reply rather than a [CANCEL] mail.
 IN_THREAD_CANCEL_RE = re.compile(
-    r"\[cancel\]|\b(?:cancel(?:l?ing|l?ed)?|withdraw(?:ing|n)?)\s+(?:this|the)\s+vote\b"
+    r"\[cancel\]|\b(?:cancel(?:l?ing|l?ed)?|withdraw(?:ing|n)?)\s+(?:this|the|our)\s+(?:[\w.-]+\s+){0,3}vote\b"
     r"|\b(?:will\s+be|is|has\s+been)\s+(?:cancell?ed|withdrawn)\b"
     r"|\b(?:re-?start|restart|re-?call)\s+(?:the|this|a\s+new)\s+vote\b",
     re.IGNORECASE,
