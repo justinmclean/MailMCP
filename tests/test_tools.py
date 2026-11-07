@@ -41,9 +41,9 @@ class ToolsTests(unittest.TestCase):
             "string",
         )
         self.assertEqual(
-            tools.TOOLS["summarize_release_vote_thread"]["inputSchema"]["properties"][
-                "message_id"
-            ]["type"],
+            tools.TOOLS["summarize_release_vote_thread"]["inputSchema"]["properties"]["message_id"][
+                "type"
+            ],
             "string",
         )
 
@@ -75,9 +75,7 @@ class ToolsTests(unittest.TestCase):
             return {**SAMPLE_STATS, "list": "dev@iceberg.incubator.apache.org"}
 
         with mock.patch.object(client, "_read_json", side_effect=fake_read_json):
-            result = tools.podling_mail_overview(
-                podling="Iceberg", list_name="dev", limit=1
-            )
+            result = tools.podling_mail_overview(podling="Iceberg", list_name="dev", limit=1)
 
         self.assertEqual(result["podling"], "iceberg")
         self.assertEqual(result["list"], "dev@iceberg.incubator.apache.org")

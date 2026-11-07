@@ -10,7 +10,6 @@ from apache_incubator_mail_mcp.client import (
     DEFAULT_LIST,
     DEFAULT_SEARCH_TIMESPAN,
     DEFAULT_TIMESPAN,
-    PODLING_PUBLIC_LISTS,
     cache_mail_stats,
     cache_mbox,
     cache_mbox_range,
@@ -722,8 +721,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     ),
     "get_incubator_general_email": schemas.tool_definition(
         description=(
-            "Fetch one full general@incubator.apache.org email by Pony Mail id "
-            "or Message-ID."
+            "Fetch one full general@incubator.apache.org email by Pony Mail id or Message-ID."
         ),
         handler=get_incubator_general_email,
         properties=schemas.email_properties(),
@@ -753,8 +751,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     ),
     "cache_incubator_general_mboxes": schemas.tool_definition(
         description=(
-            "Download and cache a range of monthly general@incubator.apache.org "
-            "mbox files."
+            "Download and cache a range of monthly general@incubator.apache.org mbox files."
         ),
         handler=cache_incubator_general_mboxes,
         properties=schemas.mbox_range_cache_properties(),
@@ -772,8 +769,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     ),
     "find_release_result_threads": schemas.tool_definition(
         description=(
-            "Find likely Incubator release vote result threads on "
-            "general@incubator.apache.org."
+            "Find likely Incubator release vote result threads on general@incubator.apache.org."
         ),
         handler=find_release_result_threads,
         properties=schemas.release_thread_search_properties(),
@@ -802,8 +798,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     ),
     "podling_mail_overview": schemas.tool_definition(
         description=(
-            "Return a high-level summary of a podling public mailing list "
-            "(dev, users, or commits)."
+            "Return a high-level summary of a podling public mailing list (dev, users, or commits)."
         ),
         handler=podling_mail_overview,
         properties=schemas.podling_live_query_properties(),

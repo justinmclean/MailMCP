@@ -533,7 +533,7 @@ class ClientTests(unittest.TestCase):
         self.assertIn("iceberg.incubator.apache.org", calls[1])
 
     def test_resolve_podling_domain_returns_flat_when_both_empty(self) -> None:
-        empty = {"hits": 0, "firstYear": None, "lastYear": None, "emails": []}
+        empty: dict[str, Any] = {"hits": 0, "firstYear": None, "lastYear": None, "emails": []}
         with mock.patch.object(client, "_read_json", return_value=empty):
             resolved = client.resolve_podling_domain(podling="newpod", list_name="dev")
         self.assertEqual(resolved, "newpod.apache.org")
