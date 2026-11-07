@@ -396,6 +396,56 @@ class ClientTests(unittest.TestCase):
         self.assertIsNone(votes[0]["result"])
         self.assertEqual(votes[1]["result"]["id"], "res")
 
+    def test_subject_variants_are_recognised(self) -> None:
+        self.assertTrue(client._is_release_vote_subject("[VOTE] Apache Toree 0.6.0-incubating RC5"))
+        self.assertFalse(client._is_release_vote_subject("[VOTE] Graduate Apache Foo"))
+        self.assertTrue(client.REPLY_PREFIX_RE.match("AW: [VOTE] Release Apache Foo 4.0.0 RC2"))
+        self.assertTrue(client.REPLY_PREFIX_RE.match("WG: [VOTE] Release Apache Foo 4.0.0 RC3"))
+        self.assertEqual(
+            client._release_key("Subject: [RESULT][VOTE] Release Apache Foo - foo-sdk 0.9.0 (RC1)"),
+            client._release_key("[VOTE] Release Apache Foo - foo-sdk 0.9.0 (RC1)"),
+        )
+
+    def test_localised_reply_joins_the_vote_thread(self) -> None:
+        subject = "[VOTE] Release Apache Foo 4.0.0-incubating RC2"
+        stats = {
+            **SAMPLE_RELEASE_STATS,
+            "emails": {
+                "vote": {
+                    "id": "vote@100@",
+                    "epoch": 100,
+                    "subject": subject,
+                    "from": "RM <rm@apache.org>",
+                },
+                "aw": {
+                    "id": "aw@200@",
+                    "epoch": 200,
+                    "subject": f"AW: {subject}",
+                    "from": "Mentor <m@apache.org>",
+                },
+            },
+        }
+        with mock.patch.object(client, "_read_json", return_value=stats):
+            result = client.podling_release_vote_history(podling="Foo")
+
+        self.assertEqual(result["vote_count"], 1)
+        self.assertEqual(result["votes"][0]["message_count"], 2)
+
+    def test_restarting_the_vote_cancels_it(self) -> None:
+        self.assertIsNotNone(
+            client.IN_THREAD_CANCEL_RE.search(
+                "We'll restart the vote once the updated RC is ready."
+            )
+        )
+
+    def test_duplicate_message_ids_are_merged(self) -> None:
+        emails = [
+            {"id": "a", "message_id": "<x@example.com>"},
+            {"id": "b", "message_id": "<x@example.com>"},
+            {"id": "c", "message_id": ""},
+        ]
+        self.assertEqual([item["id"] for item in client._unique_messages(emails)], ["a", "c"])
+
     def test_sender_key_ignores_the_list_relay_name(self) -> None:
         self.assertEqual(
             client._sender_key("ConradJam via general <general@incubator.apache.org>"),

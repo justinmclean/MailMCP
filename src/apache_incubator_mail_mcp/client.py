@@ -25,7 +25,19 @@ USER_AGENT = "apache-incubator-mail-mcp/0.1.0"
 PODLING_PUBLIC_LISTS: tuple[str, ...] = ("dev", "users", "commits")
 PODLING_FLAT_SUFFIX = "apache.org"
 PODLING_INCUBATING_SUFFIX = "incubator.apache.org"
-REPLY_PREFIX_RE = re.compile(r"^(?:\s*(?:re|fwd?):\s*)+", re.IGNORECASE)
+# Reply and forward prefixes, including those mail clients add in other
+# languages: "AW:" and "WG:" (German), "SV:" and "VS:" (Nordic), "Antw:"
+# (Dutch), "TR:" (French), "RIF:" (Italian), "ODP:" (Polish), "回复:" and
+# "转发:" (Chinese).
+REPLY_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:re|fwd?|fw|aw|wg|sv|vs|antw|tr|rif|odp|回复|答复|转发)\s*[:：]\s*)+",
+    re.IGNORECASE,
+)
+# A "Subject:" label pasted into the subject line itself.
+SUBJECT_LABEL_RE = re.compile(r"^\s*subject\s*:\s*", re.IGNORECASE)
+# A release vote subject names the release, or at least a version or RC:
+# "[VOTE] Apache Toree 0.6.0-incubating RC5" has no "Release".
+RELEASE_HINT_RE = re.compile(r"\brelease\b|\b\d+\.\d+|\brc\s*\d+\b", re.IGNORECASE)
 SUBJECT_TAG_RE = re.compile(r"\[[^\]]+\]")
 # What is left of a malformed tag, such as "RESULT]" in "RESULT][VOTE]".
 STRAY_TAG_RE = re.compile(r"\[?\b\w+\]")
@@ -44,7 +56,8 @@ IN_THREAD_RESULT_RE = re.compile(
 # A vote cancelled in a reply rather than a [CANCEL] mail.
 IN_THREAD_CANCEL_RE = re.compile(
     r"\[cancel\]|\b(?:cancel(?:l?ing|l?ed)?|withdraw(?:ing|n)?)\s+(?:this|the)\s+vote\b"
-    r"|\b(?:will\s+be|is|has\s+been)\s+(?:cancell?ed|withdrawn)\b",
+    r"|\b(?:will\s+be|is|has\s+been)\s+(?:cancell?ed|withdrawn)\b"
+    r"|\b(?:re-?start|restart|re-?call)\s+(?:the|this|a\s+new)\s+vote\b",
     re.IGNORECASE,
 )
 # A new vote call rather than its result: "The vote will remain open for at
@@ -270,7 +283,9 @@ def fetch_mail_stats(
     resolved_list = (
         payload_list if isinstance(payload_list, str) and payload_list else default_address
     )
-    emails = [item.to_dict() for item in _summaries_from_payload(payload, resolved_list)]
+    emails = _unique_messages(
+        [item.to_dict() for item in _summaries_from_payload(payload, resolved_list)]
+    )
     emails.sort(key=lambda item: item.get("epoch") or 0, reverse=True)
     if limit is not None:
         emails = emails[:limit]
@@ -288,6 +303,20 @@ def fetch_mail_stats(
         "emails": emails,
         "api_url": url,
     }
+
+
+def _unique_messages(emails: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one entry per Message-ID; the archive can hold a message twice."""
+    seen: set[str] = set()
+    unique = []
+    for email in emails:
+        key = str(email.get("message_id") or "").strip()
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        unique.append(email)
+    return unique
 
 
 def resolve_podling_domain(
@@ -543,7 +572,7 @@ def summarize_release_vote_thread(
         email
         for email in stats["emails"]
         if _is_release_cancel_subject(str(email.get("subject") or ""))
-        and _subject_core(str(email.get("subject") or "")) == subject_core
+        and _release_key(str(email.get("subject") or "")) == _release_key(subject_core)
         and (opened is None or (email.get("epoch") or 0) >= opened)
     ]
     cancel = min(cancels, key=lambda email: email.get("epoch") or 0) if cancels else None
@@ -653,7 +682,7 @@ def _find_vote_result(
         email
         for email in emails
         if _is_release_result_subject(str(email.get("subject") or ""))
-        and _subject_core(str(email.get("subject") or "")) == subject_core
+        and _release_key(str(email.get("subject") or "")) == _release_key(subject_core)
     ]
     if after_epoch is not None:
         candidates = [email for email in candidates if (email.get("epoch") or 0) >= after_epoch]
@@ -1007,14 +1036,14 @@ def _normal_subject(subject: str) -> str:
 
 
 def _strip_reply_prefix(subject: str) -> str:
-    return REPLY_PREFIX_RE.sub("", subject).strip()
+    return REPLY_PREFIX_RE.sub("", SUBJECT_LABEL_RE.sub("", subject)).strip()
 
 
 def _is_release_vote_subject(subject: str) -> bool:
     lowered = subject.casefold()
     if RESULT_WORD_RE.search(lowered) or CANCEL_WORD_RE.search(lowered):
         return False
-    return "[vote]" in lowered and "release" in lowered
+    return "[vote]" in lowered and bool(RELEASE_HINT_RE.search(lowered))
 
 
 def _is_release_cancel_subject(subject: str) -> bool:
@@ -1023,14 +1052,14 @@ def _is_release_cancel_subject(subject: str) -> bool:
         bool(CANCEL_WORD_RE.search(lowered))
         and not RESULT_WORD_RE.search(lowered)
         and "vote" in lowered
-        and "release" in lowered
+        and bool(RELEASE_HINT_RE.search(lowered))
     )
 
 
 def _is_release_result_subject(subject: str) -> bool:
     # Matches "[RESULT]" and malformed tags such as "RESULT][VOTE]".
     lowered = subject.casefold()
-    return bool(RESULT_WORD_RE.search(lowered)) and "release" in lowered
+    return bool(RESULT_WORD_RE.search(lowered)) and bool(RELEASE_HINT_RE.search(lowered))
 
 
 def _subject_core(subject: str) -> str:
